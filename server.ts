@@ -21,6 +21,12 @@ import {
   saveMeta, loadMeta, listSessions, pruneOldSessions, isValidSessionId,
   verifySessionToken
 } from './src/engine/checkpoint';
+import {
+  generatePlan, savePlan, loadPlan,
+  steerSession, listSteerHistory,
+  listStageSnapshots, undoLatestStage,
+  resolvePipelineDefaults,
+} from './src/engine/agenticCore';
 import { getStore } from './src/engine/store';
 import { Blueprint, BlueprintSchema, GovernorIntent, PillarOutput, GenerationMode, PillarName } from './src/engine/types';
 import { runPillar } from './src/engine/pillarRunner';
@@ -28,6 +34,7 @@ import { runProsecutor } from './src/engine/prosecutor';
 import { runSynthesizer } from './src/engine/synthesizer';
 import { resolveConfig, ModelConfig } from './src/engine/config';
 import { PILLAR_MAP } from './src/engine/pillarRegistry';
+import type { PipelineDefaults } from './src/engine/agenticCore';
 import { createQueue, queueStorage, validateApiKey } from './src/engine/openrouter';
 import {
   saveBlueprint,
@@ -1545,6 +1552,182 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
     generationSessionMap.delete(id);
     log.info({ sessionId: id }, '[atomic] session aborted via API');
     res.json({ ok: true, aborted: true });
+  });
+
+  // ── Agentic Core endpoints (v2.1) ──────────────────────────────────────────
+  // Plan mode (OpenAI Codex planning-first pattern), mid-run steering (Kimi
+  // mid-flight correction), stage snapshots with undo (Kilo Code), and
+  // per-pipeline verdict/budget configuration (OpenDesign composite verdict).
+
+  // POST /api/v1/generate-plan — decompose a prompt into a milestone plan.
+  // The plan is stored as a first-class checkpoint and drives the next
+  // blueprint run in this session (milestone.started/passed events).
+  v1.post('/generate-plan', apiLimiter, async (req, res): Promise<void> => {
+    try {
+      const { prompt } = req.body ?? {};
+      if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
+        res.status(400).json({ error: 'prompt is required.' });
+        return;
+      }
+      if (prompt.length > 4_000) {
+        res.status(400).json({ error: 'Prompt exceeds 4000 characters.' });
+        return;
+      }
+      const config = await extractConfig(req);
+      const id = (req.body?.sessionId as string | undefined) ?? generateSessionId();
+      if (!isValidSessionId(id)) {
+        res.status(400).json({ error: 'Invalid sessionId' });
+        return;
+      }
+      const controller = new AbortController();
+      generationSessionMap.set(id, controller);
+      try {
+        const plan = await generatePlan(prompt.trim(), config, controller.signal);
+        const version = await savePlan(id, plan);
+        res.json({ ok: true, sessionId: id, plan, version });
+      } finally {
+        generationSessionMap.delete(id);
+      }
+    } catch (err) {
+      const isAbort = (err as { name?: string })?.name === 'AbortError' ||
+        (err as Error)?.message === 'The operation was aborted.';
+      log.error({ err }, '[atomic] generate-plan failed');
+      res.status(isAbort ? 499 : 500).json({ error: 'Plan generation failed' });
+    }
+  });
+
+  // POST /api/v1/sessions/:id/steer — queue a mid-run course correction.
+  // The blueprint pipeline drains queued steers at milestone boundaries and
+  // emits steer.received events (Kimi mid-flight correction pattern).
+  v1.post('/sessions/:id/steer', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const { message } = req.body ?? {};
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      res.status(400).json({ error: 'message is required.' });
+      return;
+    }
+    if (message.length > 1_000) {
+      res.status(400).json({ error: 'Steer message exceeds 1000 characters.' });
+      return;
+    }
+    const steer = await steerSession(id, message.trim());
+    res.status(201).json({ ok: true, steer });
+  });
+
+  // GET /api/v1/sessions/:id/steers — steering history (pending + applied).
+  v1.get('/sessions/:id/steers', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const history = await listSteerHistory(id);
+    res.json({ ok: true, steers: history });
+  });
+
+  // GET /api/v1/sessions/:id/plan — retrieve the stored execution plan.
+  v1.get('/sessions/:id/plan', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const plan = await loadPlan(id);
+    if (!plan) {
+      res.status(404).json({ error: 'No plan stored for this session' });
+      return;
+    }
+    res.json({ ok: true, plan });
+  });
+
+  // GET /api/v1/sessions/:id/snapshots — list content-addressed stage
+  // snapshots (Kilo Code pattern) for rollback and audit.
+  v1.get('/sessions/:id/snapshots', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const snapshots = await listStageSnapshots(id);
+    res.json({ ok: true, snapshots });
+  });
+
+  // POST /api/v1/sessions/:id/undo — roll back to the latest stage snapshot
+  // (per-message revert semantics).
+  v1.post('/sessions/:id/undo', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const snapshot = await undoLatestStage(id);
+    if (!snapshot) {
+      res.status(404).json({ error: 'No stage snapshot to undo' });
+      return;
+    }
+    res.json({ ok: true, snapshot });
+  });
+
+  // GET /api/v1/pipelines/:name/config — current verdict/budget defaults for
+  // a pipeline (OpenDesign composite verdict configuration).
+  v1.get('/pipelines/:name/config', apiLimiter, async (req, res): Promise<void> => {
+    const name = (req.params as { name: string }).name;
+    const overrides = await loadCheckpoint<PipelineDefaults>(`pipelineConfig:${name}`, 'config');
+    const config = overrides ?? resolvePipelineDefaults(name);
+    res.json({ ok: true, name, config });
+  });
+
+  // PATCH /api/v1/pipelines/:name/config — override verdict/budget thresholds
+  // at runtime. Overrides are stored per-pipeline in the checkpoint store so
+  // tuned values survive across restarts while fresh defaults live in code.
+  v1.patch('/pipelines/:name/config', apiLimiter, async (req, res): Promise<void> => {
+    try {
+      const name = (req.params as { name: string }).name;
+      const body = req.body ?? {};
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        res.status(400).json({ error: 'Pipeline name is required.' });
+        return;
+      }
+      if (body.verdict !== undefined && (typeof body.verdict !== 'object' || !body.verdict || Array.isArray(body.verdict))) {
+        res.status(400).json({ error: 'verdict must be an object.' });
+        return;
+      }
+      if (body.budget !== undefined && (typeof body.budget !== 'object' || !body.budget || Array.isArray(body.budget))) {
+        res.status(400).json({ error: 'budget must be an object.' });
+        return;
+      }
+      // Normalise snake_case aliases and top-level convenience fields so clients
+      // can PATCH either { verdict: { score_threshold: 90 } } or
+      // { score_threshold: 90, max_steps: 40 }.
+      const verdict: { [k: string]: unknown } = body.verdict ?? {};
+      if (typeof verdict.score_threshold === 'number') verdict.scoreThreshold = verdict.score_threshold;
+      if (typeof body.score_threshold === 'number') verdict.scoreThreshold = body.score_threshold;
+      if (typeof body.max_must_fix === 'number') verdict.maxMustFix = body.max_must_fix;
+      if (typeof body.max_rounds === 'number') verdict.maxRounds = body.max_rounds;
+      delete verdict.score_threshold;
+      const budget: { [k: string]: unknown } = body.budget ?? {};
+      if (typeof budget.max_steps === 'number') budget.maxSteps = budget.max_steps;
+      if (typeof budget.max_tokens === 'number') budget.maxTokens = budget.max_tokens;
+      if (typeof body.max_steps === 'number') budget.maxSteps = body.max_steps;
+      if (typeof body.max_tokens === 'number') budget.maxTokens = body.max_tokens;
+      delete budget.max_steps;
+      delete budget.max_tokens;
+      const current = resolvePipelineDefaults(name);
+      const override: PipelineDefaults = {
+        name: current.name,
+        verdict: { ...current.verdict, ...(verdict as object ?? {}) },
+        budget: { ...current.budget, ...(budget as object ?? {}) },
+      };
+      await saveCheckpoint(`pipelineConfig:${name}`, 'config', override);
+      res.json({ ok: true, name, config: override });
+    } catch (err: any) {
+      log.error({ err }, '[atomic] pipeline config patch failed');
+      res.status(500).json({ error: 'Failed to update pipeline config' });
+    }
   });
 
   // GET /api/v1/blueprints/:id — full blueprint + notes

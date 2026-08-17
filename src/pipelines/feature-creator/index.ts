@@ -15,6 +15,7 @@
  */
 
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import { generateJson, generateText } from '../../engine/openrouter';
 import { withRetry } from '../../engine/withRetry';
 import { log } from '../../engine/logger';
@@ -315,16 +316,73 @@ export async function runFeatureCreatorPipeline(
     'feature-creator:synthesizer',
   );
 
-  // Compute a simple quality score
-  const hasAllSections = [
-    data.fileChanges.length > 0,
-    data.testPlan.unit.length > 0,
-    data.riskMatrix.length > 0,
-    data.acceptanceCriteria.length > 0,
-    data.architectureDiagram.length > 50,
-    data.implementationOrder.length > 0,
-  ];
-  data.qualityScore = Math.round((hasAllSections.filter(Boolean).length / hasAllSections.length) * 100);
+  // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
+  // composite verdict) — weak first passes are repaired up to N rounds
+  // before the verdict is final. Failure degrades gracefully to the
+  // pre-verifier candidate.
+  let candidate: FeatureBlueprint = data;
+  try {
+    const { verifyPipelineOutput } = await import('../../engine/pipelineVerifier');
+    const { resolvePipelineDefaults, captureStageSnapshot } = await import('../../engine/agenticCore');
+    const sessionId = deriveSessionId(input.featureDescription);
+    const snap = await captureStageSnapshot(
+      sessionId,
+      'synthesized',
+      { pipeline: 'feature-creator', sections: Object.keys(data) },
+    );
+    emitFn({ type: 'snapshot.captured', stage: 'synthesized', snapshotId: snap.id } as EngineEvent);
+    const { outcome, candidate: verified } = await verifyPipelineOutput<FeatureBlueprint>({
+      candidate: data,
+      config,
+      checks: FEATURE_CREATOR_CHECKS,
+      schema: FeatureBlueprintSchema,
+      systemPrompt: SYNTHESIZER_PROMPT,
+      synthesisPrompt,
+      cfg: resolvePipelineDefaults('feature-creator').verdict,
+      emit: emitFn,
+      signal,
+      label: 'feature-creator-verifier',
+    });
+    candidate = verified;
+    try {
+      const { saveCheckpoint } = await import('../../engine/checkpoint');
+      await saveCheckpoint(sessionId, 'verdict', outcome);
+      emitFn({ type: 'checkpoint_saved', key: 'verdict' });
+    } catch {
+      /* checkpoint best-effort */
+    }
+  } catch (err) {
+    log.error({ err }, '[feature-creator] verifier loop failed — shipping pre-verifier candidate');
+  }
 
-  return data;
+  // Compute a simple quality score for the elected candidate.
+  const hasAllSections = [
+    candidate.fileChanges.length > 0,
+    candidate.testPlan.unit.length > 0,
+    candidate.riskMatrix.length > 0,
+    candidate.acceptanceCriteria.length > 0,
+    candidate.architectureDiagram.length > 50,
+    candidate.implementationOrder.length > 0,
+  ];
+  candidate.qualityScore = Math.round((hasAllSections.filter(Boolean).length / hasAllSections.length) * 100);
+
+  return candidate;
+}
+
+/** Pipeline-level quality checks powering the feature-creator verifier. */
+const FEATURE_CREATOR_CHECKS: import('../../engine/pipelineVerifier').PipelineQualityCheck<FeatureBlueprint>[] = [
+  { label: 'file-changes', pass: c => c.fileChanges.length > 0, role: 'completeness' },
+  { label: 'test-plan', pass: c => c.testPlan.unit.length > 0, role: 'completeness' },
+  { label: 'risk-matrix', pass: c => c.riskMatrix.length > 0, role: 'completeness' },
+  { label: 'acceptance-criteria', pass: c => c.acceptanceCriteria.length > 0, role: 'completeness' },
+  { label: 'mermaid-diagram', pass: c => c.architectureDiagram.length > 50, role: 'actionability' },
+  { label: 'implementation-order', pass: c => c.implementationOrder.length > 0, role: 'rigour' },
+];
+
+function deriveSessionId(seed: string): string {
+  try {
+    return createHash('sha256').update(seed).digest('hex').slice(0, 32);
+  } catch {
+    return 'feature-' + Math.random().toString(36).slice(2, 10);
+  }
 }

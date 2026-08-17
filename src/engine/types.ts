@@ -249,4 +249,33 @@ export type EngineEvent =
   | { type: 'complete'; sessionId: string; blueprint?: Blueprint }
   | { type: 'stream_interrupted'; message: string; reqId?: string }
   | { type: 'error'; message: string; reqId?: string }
-  | { type: 'request_id'; reqId: string };
+  | { type: 'request_id'; reqId: string }
+  // ■■ Agentic Core v2.1 — composite verdict rounds (OpenDesign pattern) ■■
+  | { type: 'verdict.round.start'; round: number; label?: string }
+  | { type: 'verdict.issued'; round: number; verdict: string; composite: number; mustFix: number; policy?: string; label?: string }
+  | { type: 'verdict.shipped'; round: number; composite: number; label?: string }
+  | { type: 'verdict.repair.start'; round: number; label?: string }
+  | { type: 'verdict.repair.done'; round: number; label?: string }
+  | { type: 'verdict.final'; verdict: string; elected_round: number | null; label?: string }
+  // ■■ Agentic Core v2.1 — plan mode (Codex pattern) ■■
+  | { type: 'plan.created'; title: string; milestones: number }
+  | { type: 'milestone.started'; key: string }
+  | { type: 'milestone.passed'; key: string }
+  | { type: 'milestone.failed'; key: string }
+  // ■■ Agentic Core v2.1 — supervisor fan-out (Kimi/OpenCode pattern) ■■
+  | { type: 'subagent.started'; subagent: string; parent?: string | null }
+  | { type: 'subagent.done'; subagent: string; parent?: string | null }
+  | { type: 'subagent.failed'; subagent: string; parent?: string | null; category?: string; message?: string }
+  | { type: 'subagent.aborted'; subagent: string; parent?: string | null }
+  // ■■ Agentic Core v2.1 — turn budgets (Codex pattern) ■■
+  | { type: 'budget.warning'; budget_type: 'steps' | 'tokens'; label?: string; tokens_used?: number }
+  | { type: 'budget.exceeded'; budget_type: 'steps' | 'tokens'; label?: string }
+  | { type: 'step.done'; step: string; label?: string }
+  | { type: 'step.failed'; step: string; label?: string; category?: string; message?: string }
+  // ■■ Agentic Core v2.1 — snapshots + steering (Kilo pattern) ■■
+  | { type: 'snapshot.captured'; stage: string; snapshotId: string }
+  | { type: 'snapshot.restored'; snapshotId: string }
+  | { type: 'steer.received'; message: string };
+
+/** Human-readable verdict strings emitted by the agentic verdict engine. */
+export type AgenticVerdict = 'ship' | 'repair' | 'fail';

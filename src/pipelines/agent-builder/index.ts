@@ -15,11 +15,13 @@
  */
 
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import { generateJson, generateText } from '../../engine/openrouter';
 import { withRetry } from '../../engine/withRetry';
 import { log } from '../../engine/logger';
 import type { ModelConfig } from '../../engine/config';
 import type { EngineEvent } from '../../engine/types';
+import { runSupervisor } from '../../engine/agenticCore';
 
 // ── Input / Output Types ───────────────────────────────────────────────────
 
@@ -376,12 +378,30 @@ export async function runAgentBuilderPipeline(
   emitFn: (e: EngineEvent) => void,
   signal?: AbortSignal,
 ): Promise<AgentBlueprint> {
-  emitFn({ type: 'governor_start', prompt: input.agentRole });
+    emitFn({ type: 'governor_start', prompt: input.agentRole });
 
-  const pillarOutputs = await Promise.all(
-    PILLARS.map(p => runPillar(p, input, config, emitFn, signal))
+  // Agentic Core supervisor fan-out (Kimi + OpenCode pattern): each pillar
+  // runs as a supervised sub-agent with a derived abort signal; partial
+  // failure is contained per-task and reported via subagent.* events so a
+  // single flaky pillar cannot abort the whole run.
+  const supervisorId = deriveSessionId(input.agentRole);
+  const supervisorResult = await runSupervisor<string>(
+    PILLARS.map(p => ({
+      key: p.name,
+      run: async ({ signal: taskSignal }) => runPillar(p, input, config, emitFn, taskSignal),
+    })),
+    {
+      parent: supervisorId,
+      signal,
+      emit: emitFn as (event: { type: string; [k: string]: unknown }) => void,
+    },
   );
-
+  const pillarOutputs = supervisorResult.results.map(r =>
+    r.status === 'done' ? (r.result ?? '') : ''
+  );
+  if (supervisorResult.failed > 0) {
+    emitFn({ type: 'warning', message: `${supervisorResult.failed} pillar(s) failed — synthesizer will work with partial input` } as unknown as EngineEvent);
+  }
   emitFn({ type: 'governor_done', intent: { app_name: 'Agent Builder', description: input.agentRole } as any });
 
   const synthesisPrompt =
@@ -390,7 +410,7 @@ export async function runAgentBuilderPipeline(
     `\nCapabilities: ${input.agentCapabilities}` +
     `\nConstraints: ${input.agentConstraints}`;
 
-  const { data } = await withRetry(
+    const { data } = await withRetry(
     () => generateJson<AgentBlueprint>(
       synthesisPrompt,
       config,
@@ -402,18 +422,76 @@ export async function runAgentBuilderPipeline(
     'agent-builder:synthesizer',
   );
 
-  const qualityChecks = [
-    data.systemPrompt.length >= 500,
-    data.toolManifest.length > 0,
-    data.guardrails.length >= 3,
-    data.adversarialTestCases.length >= 5,
-    data.evaluationSuite.tasks.length >= 8,
-    data.orchestrationContract.maxExecutionMs > 0,
-    data.memoryDesign.length > 0,
-    data.agentBoundaries.does.length >= 3,
-    data.agentBoundaries.doesNot.length >= 3,
-  ];
-  data.qualityScore = Math.round((qualityChecks.filter(Boolean).length / qualityChecks.length) * 100);
+  // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
+  // composite verdict) — weak first passes are repaired up to N rounds
+  // before the verdict is final. Failure degrades gracefully to the
+  // pre-verifier candidate.
+  let candidate: AgentBlueprint = data;
+  try {
+    const { verifyPipelineOutput } = await import('../../engine/pipelineVerifier');
+    const { resolvePipelineDefaults, captureStageSnapshot } = await import('../../engine/agenticCore');
+    const snap = await captureStageSnapshot(
+      supervisorId,
+      'synthesized',
+      { pipeline: 'agent-builder', sections: Object.keys(data), subAgentsSucceeded: supervisorResult.succeeded },
+    );
+    emitFn({ type: 'snapshot.captured', stage: 'synthesized', snapshotId: snap.id } as EngineEvent);
+    const { outcome, candidate: verified } = await verifyPipelineOutput<AgentBlueprint>({
+      candidate: data,
+      config,
+      checks: AGENT_BUILDER_CHECKS,
+      schema: AgentBlueprintSchema,
+      systemPrompt: SYNTHESIZER_PROMPT,
+      synthesisPrompt,
+      cfg: resolvePipelineDefaults('agent-builder').verdict,
+      emit: emitFn,
+      signal,
+      label: 'agent-builder-verifier',
+    });
+    candidate = verified;
+    try {
+      const { saveCheckpoint } = await import('../../engine/checkpoint');
+      await saveCheckpoint(supervisorId, 'verdict', outcome);
+      emitFn({ type: 'checkpoint_saved', key: 'verdict' });
+    } catch {
+      /* checkpoint best-effort */
+    }
+  } catch (err) {
+    log.error({ err }, '[agent-builder] verifier loop failed — shipping pre-verifier candidate');
+  }
 
-  return data;
+  const qualityChecks = [
+    candidate.systemPrompt.length >= 500,
+    candidate.toolManifest.length > 0,
+    candidate.guardrails.length >= 3,
+    candidate.adversarialTestCases.length >= 5,
+    candidate.evaluationSuite.tasks.length >= 8,
+    candidate.orchestrationContract.maxExecutionMs > 0,
+    candidate.memoryDesign.length > 0,
+    candidate.agentBoundaries.does.length >= 3,
+    candidate.agentBoundaries.doesNot.length >= 3,
+  ];
+  candidate.qualityScore = Math.round((qualityChecks.filter(Boolean).length / qualityChecks.length) * 100);
+  return candidate;
+}
+
+/** Pipeline-level quality checks powering the agent-builder verifier. */
+const AGENT_BUILDER_CHECKS: import('../../engine/pipelineVerifier').PipelineQualityCheck<AgentBlueprint>[] = [
+  { label: 'system-prompt', pass: c => c.systemPrompt.length >= 500, role: 'completeness' },
+  { label: 'tool-manifest', pass: c => c.toolManifest.length > 0, role: 'completeness' },
+  { label: 'guardrails', pass: c => c.guardrails.length >= 3, role: 'rigour' },
+  { label: 'adversarial-tests', pass: c => c.adversarialTestCases.length >= 5, role: 'rigour' },
+  { label: 'evaluation-tasks', pass: c => c.evaluationSuite.tasks.length >= 8, role: 'rigour' },
+  { label: 'orchestration-timeout', pass: c => c.orchestrationContract.maxExecutionMs > 0, role: 'actionability' },
+  { label: 'memory-design', pass: c => c.memoryDesign.length > 0, role: 'actionability' },
+  { label: 'boundary-does', pass: c => c.agentBoundaries.does.length >= 3, role: 'completeness' },
+  { label: 'boundary-does-not', pass: c => c.agentBoundaries.doesNot.length >= 3, role: 'completeness' },
+];
+
+function deriveSessionId(seed: string): string {
+  try {
+    return createHash('sha256').update(seed).digest('hex').slice(0, 32);
+  } catch {
+    return 'agent-' + Math.random().toString(36).slice(2, 10);
+  }
 }

@@ -15,6 +15,7 @@ import { generateJson, generateText } from '../../engine/openrouter';
 import { withRetry } from '../../engine/withRetry';
 import { log } from '../../engine/logger';
 import type { ModelConfig } from '../../engine/config';
+import { createHash } from 'crypto';
 import type { EngineEvent } from '../../engine/types';
 
 // ── Input / Output Types ───────────────────────────────────────────────────
@@ -322,18 +323,77 @@ export async function runToolBuilderPipeline(
     'tool-builder:synthesizer',
   );
 
-  const hasAll = [
-    data.toolName.length > 0,
-    data.toolDescription.length >= 50,
-    Object.keys(data.inputSchema.properties).length > 0,
-    data.mcpDefinition.length > 100,
-    data.implementationSkeleton.length > 100,
-    data.testSuite.length > 100,
-    data.securityNotes.length > 0,
-    data.errors.length > 0,
-    data.usageExamples.length > 0,
-  ];
-  data.qualityScore = Math.round((hasAll.filter(Boolean).length / hasAll.length) * 100);
+    // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
+  // composite verdict) — weak first passes are repaired up to N rounds
+  // before the verdict is final. Failure degrades gracefully to the
+  // pre-verifier candidate.
+  let candidate: ToolBlueprint = data;
+  try {
+    const { verifyPipelineOutput } = await import('../../engine/pipelineVerifier');
+    const { resolvePipelineDefaults, captureStageSnapshot } = await import('../../engine/agenticCore');
+    const sessionId = deriveSessionId(input.toolConcept);
+    const snap = await captureStageSnapshot(
+      sessionId,
+      'synthesized',
+      { pipeline: 'tool-builder', sections: Object.keys(data) },
+    );
+    emitFn({ type: 'snapshot.captured', stage: 'synthesized', snapshotId: snap.id } as EngineEvent);
+    const { outcome, candidate: verified } = await verifyPipelineOutput<ToolBlueprint>({
+      candidate: data,
+      config,
+      checks: TOOL_BUILDER_CHECKS,
+      schema: ToolBlueprintSchema,
+      systemPrompt: SYNTHESIZER_PROMPT,
+      synthesisPrompt,
+      cfg: resolvePipelineDefaults('tool-builder').verdict,
+      emit: emitFn,
+      signal,
+      label: 'tool-builder-verifier',
+    });
+    candidate = verified;
+    try {
+      const { saveCheckpoint } = await import('../../engine/checkpoint');
+      await saveCheckpoint(sessionId, 'verdict', outcome);
+      emitFn({ type: 'checkpoint_saved', key: 'verdict' });
+    } catch {
+      /* checkpoint best-effort */
+    }
+  } catch (err) {
+    log.error({ err }, '[tool-builder] verifier loop failed — shipping pre-verifier candidate');
+  }
 
-  return data;
+  const hasAll = [
+    candidate.toolName.length > 0,
+    candidate.toolDescription.length >= 50,
+    Object.keys(candidate.inputSchema.properties).length > 0,
+    candidate.mcpDefinition.length > 100,
+    candidate.implementationSkeleton.length > 100,
+    candidate.testSuite.length > 100,
+    candidate.securityNotes.length > 0,
+    candidate.errors.length > 0,
+    candidate.usageExamples.length > 0,
+  ];
+  candidate.qualityScore = Math.round((hasAll.filter(Boolean).length / hasAll.length) * 100);
+  return candidate;
+}
+
+/** Pipeline-level quality checks powering the tool-builder verifier. */
+const TOOL_BUILDER_CHECKS: import('../../engine/pipelineVerifier').PipelineQualityCheck<ToolBlueprint>[] = [
+  { label: 'tool-name', pass: c => c.toolName.length > 0, role: 'completeness' },
+  { label: 'tool-description', pass: c => c.toolDescription.length >= 50, role: 'completeness' },
+  { label: 'input-schema', pass: c => Object.keys(c.inputSchema.properties).length > 0, role: 'completeness' },
+  { label: 'mcp-definition', pass: c => c.mcpDefinition.length > 100, role: 'actionability' },
+  { label: 'implementation-skeleton', pass: c => c.implementationSkeleton.length > 100, role: 'actionability' },
+  { label: 'test-suite', pass: c => c.testSuite.length > 100, role: 'rigour' },
+  { label: 'security-notes', pass: c => c.securityNotes.length > 0, role: 'rigour' },
+  { label: 'error-handling', pass: c => c.errors.length > 0, role: 'rigour' },
+  { label: 'usage-examples', pass: c => c.usageExamples.length > 0, role: 'actionability' },
+];
+
+function deriveSessionId(seed: string): string {
+  try {
+    return createHash('sha256').update(seed).digest('hex').slice(0, 32);
+  } catch {
+    return 'tool-' + Math.random().toString(36).slice(2, 10);
+  }
 }

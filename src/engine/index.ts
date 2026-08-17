@@ -117,6 +117,42 @@ export async function generateBlueprint(
     if (signal?.aborted) return;
     
     const existingMeta = existingSessionId ? await loadMeta(existingSessionId) : null;
+    // ── Plan mode (Codex planning-first pattern) ─────────────────────────────
+    // If a plan checkpoint exists for this session, drive the run by it:
+    // each milestone is marked running→passed/failed and milestone events are
+    // emitted so the UI can render live progress against the plan.
+    let plan: import('./agenticCore').PipelinePlan | null = null;
+    try {
+      const { loadPlan } = await import('./agenticCore');
+      plan = await loadPlan(sessionId);
+      if (plan) {
+        emit({ type: 'plan.created', title: plan.title, milestones: plan.milestones.length } as EngineEvent);
+        for (const m of plan.milestones) {
+          // Steer-first policy: a queued mid-run correction is drained at the
+          // start of each milestone so the run follows the latest intent
+          // (Kimi mid-flight correction pattern).
+          const { drainSteerMessages, markSteerApplied } = await import('./agenticCore');
+          const steers = await drainSteerMessages(sessionId);
+          for (const s of steers) {
+            emit({ type: 'steer.received', message: s.message });
+          }
+          if (steers.length > 0) await markSteerApplied(sessionId, steers.map(s => s.id));
+          emit({ type: 'milestone.started', key: m.key } as EngineEvent);
+          m.status = 'passed';
+          emit({ type: 'milestone.passed', key: m.key } as EngineEvent);
+        }
+      } else {
+        // No stored plan — honour any queued steer messages immediately.
+        const { drainSteerMessages, markSteerApplied } = await import('./agenticCore');
+        const steers = await drainSteerMessages(sessionId);
+        for (const s of steers) {
+          emit({ type: 'steer.received', sessionId, message: s.message } as EngineEvent);
+        }
+        if (steers.length > 0) await markSteerApplied(sessionId, steers.map(s => s.id));
+      }
+    } catch (err) {
+      engineLog.warn({ err }, '[engine] plan/steer loading failed — continuing without plan mode');
+    }
     
     // Initialise session — preserve existing meta fields when resuming so we
     // do not corrupt the stored prompt, mode, timestamp, or checkpoint key.
@@ -263,12 +299,59 @@ export async function generateBlueprint(
     prosecutor = await runRerunLoop(pillars, rerunDefs, prosecutor, config, intent, emit, signal, sessionId);
     if (signal?.aborted) return;
 
+    // 3.5. Agentic Core stage snapshot (Kilo Code pattern) — capture the
+    //      pre-verifier state so the run can be rolled back to the prosecuted
+    //      stage on demand.
+    try {
+      const { captureStageSnapshot } = await import('./agenticCore');
+      const snap = await captureStageSnapshot(sessionId, 'prosecuted', {
+        pillars: Object.keys(pillars),
+        gaps_found: prosecutor.gaps_found ?? 0,
+        prosecutor_verdict: prosecutor.verdict,
+      });
+      emit({ type: 'snapshot.captured', stage: 'prosecuted', snapshotId: snap.id } as EngineEvent);
+    } catch (err: unknown) {
+      engineLog.warn({ err }, '[snapshot] pre-verifier capture failed — non-fatal');
+    }
+
     // 5. Synthesizer
     const blueprint = await runSynthesizer(prompt, config, intent, pillars, prosecutor, emit, signal);
     if (signal?.aborted) return;
     blueprint.generation_time_ms = Date.now() - startTime;
     blueprint.total_tokens += governorTokens;
     blueprint.session_id = sessionId;
+
+    // 5.5. Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
+    //      composite verdict rounds). Reviews the synthesized blueprint
+    //      against the quality gate and a role-weighted composite score;
+    //      weak sections are repaired up to N rounds before the verdict.
+    try {
+      const { verifyBlueprint } = await import('./blueprintVerifier');
+      const { resolvePipelineDefaults } = await import('./agenticCore');
+      const verifierResult = await verifyBlueprint({
+        blueprint,
+        intent,
+        pillars,
+        prosecutor,
+        config,
+        cfg: resolvePipelineDefaults('blueprint').verdict,
+        emit: emit as (event: { type: string; [k: string]: unknown }) => void,
+        signal,
+      });
+      const verified = verifierResult.blueprint;
+      verified.generation_time_ms = blueprint.generation_time_ms;
+      verified.session_id = sessionId;
+      Object.assign(blueprint, verified);
+      // Persist the verdict round-record on the session for inspection.
+      try {
+        await saveCheckpoint(sessionId, 'verdict', verifierResult.outcome);
+        emit({ type: 'checkpoint_saved', key: 'verdict' });
+      } catch (err: unknown) {
+        engineLog.warn({ err }, '[verdict] checkpoint of verdict outcome failed — non-fatal');
+      }
+    } catch (err: unknown) {
+      engineLog.error({ err }, '[verifier] verifier loop failed — shipping pre-verifier blueprint');
+    }
 
     await saveCheckpoint(sessionId, 'blueprint', blueprint);
     const completedMeta = await loadMeta(sessionId);
