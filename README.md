@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.2.0-blue)
-![Tests](https://img.shields.io/badge/tests-299%20passing-green)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
+![Tests](https://img.shields.io/badge/tests-337%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,6 +33,24 @@ Five concrete gaps were identified and closed with real working logic:
 - **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
   estimation, verdict, and drift per run — queryable via the new `/runs`,
   `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
+
+## What's New in 2.3.0 — Engine Plugin Platform (August 2026)
+
+Atomic now hosts a full **plugin engine** modelled on OpenDesign's plugin
+platform, plus the universal **SKILL.md bridge** that every major agent
+system consumes. Atomic's pipelines can be extended by installable plugins
+(manuscripts, reviewers, transformers, exporters, reporters) with a versioned
+manifest schema, a **doctor** validator, **content-addressed digests** that
+re-lock trust grants when behaviour changes, and a **per-session trust store**
+with capability gating — restricted plugins can never touch blueprint data.
+Plugins run on Atomic's agentic core: stage pipelines with `repeat`/`until`
+composite-score loops, token budgets, and abort propagation.
+
+Crucially, Atomic itself is now an installable plugin anywhere else: the
+**skill packs** endpoint renders each pipeline as portable `SKILL.md` +
+`AGENTS.md` + `.claude-plugin/plugin.json`, so Codex, Claude Code, OpenCode,
+and Kilo Code can all run Atomic's 7-pillar deliberation with its
+verifier-repair quality gate inside their own sessions.
 
 ## What's New in 2.1.0 — Agentic Pipelines (August 2026)
 

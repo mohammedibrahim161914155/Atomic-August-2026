@@ -32,6 +32,18 @@ import { answerElicitations, pendingElicitations, listElicitationHistory } from 
 import { listEffectiveTiers, setOperationTier } from './src/engine/permissionRegistry';
 import { listLedger, summarizeLedger } from './src/engine/qualityLedger';
 import { listRunSummaries } from './src/engine/runSummary';
+import {
+  listPlugins, getPlugin, getPublicPlugin,
+} from './src/plugins/engine/registry';
+import { publicManifest } from './src/plugins/engine/schema';
+import { validateManifest } from './src/plugins/engine/doctor';
+import { installPlugin, uninstallPlugin } from './src/plugins/engine/registry';
+import type { GrantableCapability } from './src/plugins/engine/trust';
+import {
+  trustView, grantTrust, revokeTrust,
+} from './src/plugins/engine/trust';
+import { runPluginPipeline } from './src/plugins/engine/runtime';
+import { generateSkillPack, listSkillPacks } from './src/plugins/engine/skillPack';
 import { Blueprint, BlueprintSchema, GovernorIntent, PillarOutput, GenerationMode, PillarName } from './src/engine/types';
 import { runPillar } from './src/engine/pillarRunner';
 import { runProsecutor } from './src/engine/prosecutor';
@@ -1772,6 +1784,155 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
     res.json({ ok: true, runs });
   });
 
+  // ── Engine plugin endpoints (v2.3 — OpenDesign plugin platform parity) ─
+  // POST /api/v1/plugins/doctor — validate an arbitrary manifest without
+  // installing it (OpenDesign doctor step for untrusted sources).
+  v1.post('/plugins/doctor', apiLimiter, (req, res): void => {
+    const body = (req.body ?? {}) as { manifest?: unknown };
+    if (!body.manifest || typeof body.manifest !== 'object') {
+      res.status(400).json({ ok: false, error: 'A manifest object is required' });
+      return;
+    }
+    const result = validateManifest(body.manifest);
+    res.json({ ok: result.ok, errors: result.errors, warnings: result.warnings });
+  });
+  // POST /api/v1/plugins/install — validate + register an untrusted manifest
+  // (trust remains restricted until grants are issued per-session).
+  v1.post('/plugins/install', apiLimiter, (req, res): void => {
+    const body = (req.body ?? {}) as { manifest?: unknown };
+    if (!body.manifest || typeof body.manifest !== 'object') {
+      res.status(400).json({ ok: false, error: 'A manifest object is required' });
+      return;
+    }
+    const { entry, doctor } = installPlugin(body.manifest);
+    if (!entry) {
+      res.status(400).json({ ok: false, errors: doctor.errors, warnings: doctor.warnings });
+      return;
+    }
+    res.json({ ok: true, plugin: { id: entry.manifest.id, digest: entry.digest, valid: doctor.ok, warnings: doctor.warnings } });
+  });
+  // DELETE /api/v1/plugins/:id — remove an installed plugin (built-ins protected).
+  v1.delete('/plugins/:id', apiLimiter, (req, res): void => {
+    const id = (req.params as { id: string }).id;
+    const entry = getPlugin(id);
+    if (!entry) { res.status(404).json({ error: 'Plugin not found' }); return; }
+    if (!uninstallPlugin(id)) {
+      res.status(400).json({ error: 'Cannot remove built-in plugins; unregister via the registry' });
+      return;
+    }
+    res.json({ ok: true, removed: id });
+  });
+  // GET /api/v1/plugins — every engine plugin (built-ins + installed), with
+  // digest provenance and doctor status. Prompt bodies are hidden.
+  v1.get('/plugins', apiLimiter, (req, res): void => {
+    res.json({ ok: true, plugins: listPlugins().map((p) => ({ id: p.manifest.id, manifest: getPublicPlugin(p.manifest.id)?.manifest, digest: p.digest, source: p.source, valid: p.doctor.ok, warnings: p.doctor.warnings })) });
+  });
+  // GET /api/v1/plugins/:id — one plugin (public view) + trust summary.
+  v1.get('/plugins/:id', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    const entry = getPlugin(id);
+    if (!entry) { res.status(404).json({ error: 'Plugin not found' }); return; }
+    const session = (req.query as { session?: string }).session;
+    const view = session && isValidSessionId(session) ? await trustView(session, id, entry.manifest) : undefined;
+    res.json({ ok: true, manifest: publicManifest(entry.manifest), digest: entry.digest, source: entry.source, valid: entry.doctor.ok, warnings: entry.doctor.warnings, trust: view });
+  });
+  // GET /api/v1/plugins/:id/pack — installable skill pack (SKILL.md +
+  // .claude-plugin/plugin.json + AGENTS.md) for Codex/Claude Code/OpenCode/Kilo Code.
+  v1.get('/plugins/:id/pack', apiLimiter, (req, res): void => {
+    const id = (req.params as { id: string }).id;
+    const pack = generateSkillPack(id);
+    if (!pack) { res.status(404).json({ error: 'Skill pack not found for this plugin' }); return; }
+    res.json({ ok: true, pack_id: pack.id, files: pack.files });
+  });
+  // GET /api/v1/skill-packs — list of generated skill pack ids.
+  v1.get('/skill-packs', apiLimiter, (req, res): void => {
+    res.json({ ok: true, packs: listSkillPacks() });
+  });
+  // POST /api/v1/plugins/:id/run — run a plugin's pipeline in a session with
+  // the operator's API key. Capability gates are enforced per stage via the
+  // trust store (restricted plugins run, but never touch blueprint data).
+  v1.post('/plugins/:id/run', apiLimiter, async (req, res): Promise<void> => {
+    try {
+      const id = (req.params as { id: string }).id;
+      const entry = getPlugin(id);
+      if (!entry) { res.status(404).json({ error: 'Plugin not found' }); return; }
+      const body = (req.body ?? {}) as { session?: string; inputs?: Record<string, unknown> };
+      const session = body.session;
+      if (!session || !isValidSessionId(session)) {
+        res.status(400).json({ error: 'A valid session id is required' });
+        return;
+      }
+      const config = resolveConfig({});
+      const blueprint = await loadCheckpoint<Blueprint>(session, 'blueprint');
+      const outcome = await runPluginPipeline({
+        sessionId: session,
+        manifest: entry.manifest,
+        config,
+        inputs: body.inputs ?? {},
+        blueprintText: blueprint ? (typeof blueprint === 'string' ? blueprint : JSON.stringify(blueprint).slice(0, 60_000)) : undefined,
+      });
+      res.json({ ok: true, run_id: `${id}:${session.slice(0, 8)}`, ...outcome });
+    } catch (err: any) {
+      log.error({ err }, '[plugin] run failed');
+      res.status(500).json({ error: 'Plugin run failed' });
+    }
+  });
+  // GET /api/v1/plugins/:id/trust — effective capability grants for a session.
+  v1.get('/plugins/:id/trust', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    const entry = getPlugin(id);
+    if (!entry) { res.status(404).json({ error: 'Plugin not found' }); return; }
+    const session = (req.query as { session?: string }).session;
+    if (!session || !isValidSessionId(session)) {
+      res.status(400).json({ error: 'A valid session id is required' });
+      return;
+    }
+    res.json({ ok: true, plugin_id: id, ...await trustView(session, id, entry.manifest) });
+  });
+  // PATCH /api/v1/plugins/:id/trust — grant capabilities for a session
+  // (digest-bound; re-grant required after manifest content changes).
+  v1.patch('/plugins/:id/trust', apiLimiter, async (req, res): Promise<void> => {
+    try {
+      const id = (req.params as { id: string }).id;
+      const entry = getPlugin(id);
+      if (!entry) { res.status(404).json({ error: 'Plugin not found' }); return; }
+      const body = (req.body ?? {}) as { session?: string; grant?: string[]; revoke?: boolean };
+      const session = body.session;
+      if (!session || !isValidSessionId(session)) {
+        res.status(400).json({ error: 'A valid session id is required' });
+        return;
+      }
+      if (body.revoke) {
+        await revokeTrust(session, id);
+        res.json({ ok: true, plugin_id: id, granted: [] });
+        return;
+      }
+      if (!Array.isArray(body.grant) || body.grant.length === 0) {
+        res.status(400).json({ error: 'grant must be a non-empty capability array, or set revoke=true' });
+        return;
+      }
+      const granted = await grantTrust(session, id, body.grant as GrantableCapability[], entry.manifest);
+      res.json({ ok: true, plugin_id: id, granted });
+    } catch (err: any) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+  // DELETE /api/v1/plugins/:id/trust — revoke all grants for a session.
+  v1.delete('/plugins/:id/trust', apiLimiter, async (req, res): Promise<void> => {
+    try {
+      const id = (req.params as { id: string }).id;
+      if (!getPlugin(id)) { res.status(404).json({ error: 'Plugin not found' }); return; }
+      const session = (req.query as { session?: string }).session;
+      if (!session || !isValidSessionId(session)) {
+        res.status(400).json({ error: 'A valid session id is required' });
+        return;
+      }
+      await revokeTrust(session, id);
+      res.json({ ok: true, plugin_id: id, granted: [] });
+    } catch (err: any) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   // GET /api/v1/pipelines/:name/config — current verdict/budget defaults for
   // a pipeline (OpenDesign composite verdict configuration).
   v1.get('/pipelines/:name/config', apiLimiter, async (req, res): Promise<void> => {

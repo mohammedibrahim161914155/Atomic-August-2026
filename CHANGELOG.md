@@ -2,6 +2,54 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.3.0] — August 2026
+
+### Added — engine plugin platform (OpenDesign plugin parity + universal SKILL.md bridge)
+
+Atomic now ships a full server-side plugin engine so pipelines can be extended
+by installable plugins and — via skill packs — Atomic's own 7-pillar pipelines
+can run inside Codex, Claude Code, OpenCode, and Kilo Code.
+
+- `src/plugins/engine/schema.ts` — **manifest schema** (Zod): versioned
+  `specVersion`, kind taxonomy (`reviewer`/`skill`/`generator`/`exporter`/
+  `transformer`/`reporter`), capability allow-list (`prompt:inject`,
+  `blueprint:read`, `blueprint:write`, `events`, `api:call`), stage pipeline
+  shape with OpenDesign-style `repeat`/`until`/`max_iterations` loops.
+- `src/plugins/engine/doctor.ts` — **doctor** validation with cross-field
+  rules (id format, until-grammar, stage ordering, capability/kind
+  compatibility) plus warning diagnostics, exactly like OpenDesign's
+  `validate-manifest`.
+- `src/plugins/engine/digest.ts` — **content-addressed plugin digests** (Kilo
+  Code pattern): behaviour-defining fields are hashed to a 16-hex id; cosmetic
+  metadata edits are ignored. Digests bind trust grants so a mutated plugin
+  must be re-approved.
+- `src/plugins/engine/trust.ts` — **per-session trust store** with persistent
+  grants, deny-lists, digest re-locking on re-install, and capability gating
+  (restricted plugins never touch blueprint data).
+- `src/plugins/engine/runtime.ts` — **stage pipeline runner** over the
+  agentic core: `generate` → `review` → `transform`/`export` stages with
+  `repeat: true` + `until` composite-score loops, token budgets, abort
+  propagation, and the same 4-role composite verdict as the pipelines.
+- `src/plugins/engine/skillPack.ts` — the **"run anywhere" bridge**: Atomic's
+  four pipelines rendered as portable skill packs (SKILL.md + AGENTS.md +
+  `.claude-plugin/plugin.json` + README) so Atomic itself becomes an
+  installable plugin in Codex (`--add-skills`), Claude Code (plugin
+  manifest), OpenCode (`~/.config/opencode/skills/`), and Kilo Code
+  (`.claude/skills/`).
+- `src/plugins/engine/builtIns.ts` — four trusted built-ins:
+  `builtin:atomic-{blueprint,feature,tool,agent}` pipeline skills plus
+  `builtin:blueprint-reviewer`, `builtin:cost-estimator`, and
+  `builtin:quality-ledger-audit` engine plugins.
+- `src/plugins/engine/registry.ts` — registry with public projection (prompt
+  hiding), install/uninstall lifecycle, and a protected built-in allow-list.
+- Seven new API endpoints: `POST /plugins/doctor`, `POST /plugins/install`,
+  `DELETE /plugins/:id`, `GET /plugins/:id/pack` (skill pack),
+  `GET /skill-packs`, `POST /plugins/:id/run`, plus trust GET/PATCH/DELETE —
+  all rate-limited and validated.
+- 38 new tests (337 total passing) covering schema, doctor rules, digest
+  stability, trust isolation, until evaluation, capability gating, registry
+  lifecycle, and the full skill-pack render.
+
 ## [2.2.0] — August 2026
 
 ### Added — comparative gap-closing layer (Codex · OpenCode · Kimi · Kilo Code · OpenDesign)
