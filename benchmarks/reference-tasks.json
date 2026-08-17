@@ -1,0 +1,162 @@
+[
+  {
+    "id": "task-001",
+    "name": "SaaS CRM Platform",
+    "complexity": "medium",
+    "prompt": "Build a B2B CRM SaaS platform with multi-tenant support, contact management, deal pipeline, email integration, and reporting dashboard. Target market: SMB sales teams of 5-50 people.",
+    "expectedSections": ["overview", "architecture", "api", "database", "security", "frontend", "deployment"],
+    "minimumQualityScore": 65,
+    "scoreBaseline": {
+      "completeness": 75,
+      "specificity": 70,
+      "correctness": 80,
+      "implementationClarity": 72
+    },
+    "requiredKeywords": ["multi-tenant", "auth", "PostgreSQL", "API", "dashboard", "migration"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder", "example.com"]
+  },
+  {
+    "id": "task-002",
+    "name": "Real-time Multiplayer Game Backend",
+    "complexity": "high",
+    "prompt": "Design the backend for a real-time multiplayer strategy game supporting 10,000 concurrent users per game room, WebSocket connections, game state synchronization, matchmaking, leaderboards, and anti-cheat mechanisms.",
+    "expectedSections": ["architecture", "api", "database", "security", "deployment", "production"],
+    "minimumQualityScore": 60,
+    "scoreBaseline": {
+      "completeness": 70,
+      "specificity": 65,
+      "correctness": 75,
+      "implementationClarity": 68
+    },
+    "requiredKeywords": ["WebSocket", "Redis", "matchmaking", "anti-cheat", "scale", "state"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-003",
+    "name": "Healthcare Patient Portal",
+    "complexity": "high",
+    "prompt": "Build a HIPAA-compliant patient portal for a medical clinic. Features: appointment scheduling, secure messaging with providers, medical record viewing, prescription refills, telehealth video calls, and billing/insurance integration.",
+    "expectedSections": ["overview", "security", "api", "database", "frontend", "deployment", "completeness"],
+    "minimumQualityScore": 70,
+    "scoreBaseline": {
+      "completeness": 78,
+      "specificity": 72,
+      "correctness": 82,
+      "implementationClarity": 75
+    },
+    "requiredKeywords": ["HIPAA", "encryption", "audit", "PHI", "telehealth", "authentication"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder", "assume"]
+  },
+  {
+    "id": "task-004",
+    "name": "E-commerce Marketplace",
+    "complexity": "medium",
+    "prompt": "Create a multi-vendor e-commerce marketplace similar to Etsy. Features: seller onboarding, product listings with variants, cart and checkout with Stripe, order management, seller payouts, reviews, and search with filters.",
+    "expectedSections": ["overview", "architecture", "api", "database", "security", "frontend", "deployment"],
+    "minimumQualityScore": 65,
+    "scoreBaseline": {
+      "completeness": 73,
+      "specificity": 68,
+      "correctness": 78,
+      "implementationClarity": 70
+    },
+    "requiredKeywords": ["Stripe", "multi-vendor", "payment", "search", "inventory", "order"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-005",
+    "name": "Developer Tools API Gateway",
+    "complexity": "high",
+    "prompt": "Design an API gateway product for developers: rate limiting, authentication (API keys, OAuth2, JWT), request routing, response caching, analytics, webhook management, and a developer portal with documentation.",
+    "expectedSections": ["architecture", "security", "api", "database", "production", "deployment"],
+    "minimumQualityScore": 68,
+    "scoreBaseline": {
+      "completeness": 76,
+      "specificity": 74,
+      "correctness": 82,
+      "implementationClarity": 78
+    },
+    "requiredKeywords": ["rate limiting", "OAuth", "JWT", "routing", "caching", "webhook", "developer portal"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-006",
+    "name": "Simple Todo App",
+    "complexity": "trivial",
+    "prompt": "Build a simple personal todo app with task creation, completion tracking, due dates, and tags. Single user, no collaboration needed.",
+    "expectedSections": ["overview", "api", "database", "frontend"],
+    "minimumQualityScore": 75,
+    "scoreBaseline": {
+      "completeness": 80,
+      "specificity": 75,
+      "correctness": 85,
+      "implementationClarity": 82
+    },
+    "requiredKeywords": ["CRUD", "database", "API", "auth"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-007",
+    "name": "AI Content Generation Platform",
+    "complexity": "high",
+    "prompt": "Build an AI-powered content generation platform: users input a topic and tone, the system generates blog posts, social media captions, and email copy using LLMs. Features: history, templates, brand voice settings, and team collaboration.",
+    "expectedSections": ["architecture", "api", "database", "security", "frontend", "production"],
+    "minimumQualityScore": 65,
+    "scoreBaseline": {
+      "completeness": 72,
+      "specificity": 68,
+      "correctness": 76,
+      "implementationClarity": 70
+    },
+    "requiredKeywords": ["LLM", "streaming", "rate limiting", "template", "history", "collaboration"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-008",
+    "name": "IoT Fleet Management",
+    "complexity": "very-high",
+    "prompt": "Design a fleet management platform for IoT devices: device registration and provisioning, real-time telemetry ingestion (10M events/day), alerting rules, OTA firmware updates, device grouping, and historical analytics.",
+    "expectedSections": ["architecture", "database", "security", "production", "deployment", "completeness"],
+    "minimumQualityScore": 58,
+    "scoreBaseline": {
+      "completeness": 65,
+      "specificity": 62,
+      "correctness": 72,
+      "implementationClarity": 65
+    },
+    "requiredKeywords": ["MQTT", "telemetry", "time-series", "OTA", "firmware", "alerts", "scale"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-009",
+    "name": "Event Ticketing System",
+    "complexity": "medium",
+    "prompt": "Build an event ticketing platform: event creation, tiered ticket types, seat selection, QR code generation for tickets, barcode scanning for entry, waitlist management, and refund processing.",
+    "expectedSections": ["overview", "api", "database", "security", "frontend", "deployment"],
+    "minimumQualityScore": 65,
+    "scoreBaseline": {
+      "completeness": 74,
+      "specificity": 70,
+      "correctness": 78,
+      "implementationClarity": 72
+    },
+    "requiredKeywords": ["QR code", "payment", "seat", "inventory", "refund", "barcode"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder"]
+  },
+  {
+    "id": "task-010",
+    "name": "Financial Portfolio Tracker",
+    "complexity": "medium",
+    "prompt": "Create a personal finance portfolio tracker: connect brokerage accounts via OAuth, fetch holdings and transactions, calculate performance metrics (IRR, TWRR), tax lot tracking, dividend tracking, and rebalancing suggestions.",
+    "expectedSections": ["overview", "security", "api", "database", "frontend", "production"],
+    "minimumQualityScore": 65,
+    "scoreBaseline": {
+      "completeness": 73,
+      "specificity": 70,
+      "correctness": 78,
+      "implementationClarity": 72
+    },
+    "requiredKeywords": ["OAuth", "encryption", "tax", "performance", "dividend", "brokerage"],
+    "forbiddenPatterns": ["TODO", "TBD", "placeholder", "real data"]
+  }
+]

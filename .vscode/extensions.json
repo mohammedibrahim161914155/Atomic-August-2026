@@ -1,0 +1,17 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "ms-vscode.vscode-typescript-next",
+    "vitest.explorer",
+    "antfu.vite",
+    "zxh404.vscode-proto3",
+    "PKief.material-icon-theme",
+    "usernamehw.errorlens",
+    "aaron-bond.better-comments",
+    "github.copilot",
+    "github.copilot-chat",
+    "saoudrizwan.claude-dev"
+  ]
+}

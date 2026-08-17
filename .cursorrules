@@ -1,0 +1,70 @@
+# Atomic Blueprint Generator — Cursor Rules
+
+## Project Overview
+Atomic is a zero-inference-cost multi-agent AI blueprint generator. The host agent makes all LLM calls via the Vercel AI SDK. Atomic orchestrates the pipeline and exposes results through an Express API + SSE stream.
+
+## Architecture
+- **Backend**: `server.ts` — Express + Vite middleware on port 5000
+- **Pipeline**: `src/engine/index.ts` — Governor → Pillars → Prosecutor → Synthesizer
+- **Types**: `src/engine/types.ts` — all shared TypeScript types and Zod schemas
+- **Models**: `src/models/registry.ts` — canonical model registry (single source of truth)
+- **MCP**: `src/mcp/server.ts` — exposes Atomic as MCP tools for coding agents
+
+## File Naming Conventions
+- Engine files: `camelCase.ts` (e.g., `agentRunner.ts`, `pillarRunner.ts`)
+- Pillar files: `camelCase.ts` in `src/engine/pillars/` (e.g., `planning.ts`, `edgeCases.ts`)
+- Test files: `<filename>.test.ts` co-located with source
+- React components: `PascalCase.tsx` in `src/pages/` or `src/components/`
+
+## TypeScript Requirements
+- **Strict mode** — zero `any`, zero unchecked `unknown` casts
+- All external data validated with **Zod** at the boundary
+- Use **discriminated unions** for typed errors — never `throw new Error('generic')`
+- Export types explicitly — `export type { Foo }` not `export { Foo }`
+- No `as` casts without a preceding type guard
+
+## Testing Requirements
+- Every new engine file must have a co-located `.test.ts`
+- Mock LLM calls using `vi.mock('../__mocks__/openrouter')` pattern
+- Test both happy path and error/timeout cases
+- Use `vitest` — not Jest (imports differ slightly)
+
+## Key Patterns
+```typescript
+// Correct: retry wrapper around LLM calls
+const result = await withRetry(() => generateText(prompt, config), { label: 'my-agent' });
+
+// Correct: context budget check before dispatch
+const budget = ContextBudgetManager.calculate({ modelId, systemPrompt, context, outputReserve: 2000 });
+if (budget.available < 1000) throw new ContextOverflowError(budget);
+
+// Correct: Zod schema validation on LLM output
+const parsed = MySchema.safeParse(rawOutput);
+if (!parsed.success) throw new ValidationError(parsed.error);
+
+// Correct: emit SSE event
+emit({ type: 'agent_done', pillar: 'security', agent: 'threat-modeler', preview: result.text.slice(0, 200) });
+```
+
+## What NOT to Change
+- `EngineEvent` union in `src/engine/types.ts` — removing event types is a breaking change
+- `BlueprintSchema` fields — persisted in DB; schema changes require migrations
+- SSE wire format: `data: ${JSON.stringify(event)}\n\n`
+- `AsyncLocalStorage` session propagation — do not add `sessionId` to function signatures
+- `withRetry` error classification logic
+
+## Do Not
+- Hardcode API keys or secrets in any file
+- Use `any` type — use `unknown` + narrowing or proper generics
+- Use synchronous I/O (`readFileSync`, `execSync`) in the request path
+- Use `console.log` — use `log` from `src/engine/logger.ts`
+- Create new model ID strings outside `src/models/registry.ts`
+- Skip the context budget check before LLM calls
+
+## Useful Commands
+```bash
+npm run dev          # Dev server (port 5000)
+npm run test         # Vitest suite
+npm run lint         # TypeScript + ESLint
+npm run build        # Production build
+```

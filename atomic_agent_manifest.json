@@ -1,0 +1,340 @@
+{
+  "$schema": "https://atomic.dev/schemas/agent-manifest/v1.json",
+  "manifestVersion": "1.0.0",
+  "system": "Atomic Blueprint Generator",
+  "description": "Multi-agent AI blueprint generator. Makes zero inference calls — the host agent provides all LLM capability.",
+  "generatedAt": "2026-06-05",
+  "pipeline": {
+    "pattern": "Governor → Parallel Pillars → Per-Pillar QA → Global Prosecutor → Rerun Loop → Synthesizer → Bundle",
+    "maxReruns": 3,
+    "defaultMode": "fast",
+    "supportedModes": ["fast", "safe"]
+  },
+  "agents": [
+    {
+      "id": "governor",
+      "role": "Intent Extraction",
+      "description": "Parses the user's raw prompt into a structured GovernorIntent. Identifies product name, domain, core problem, target users, key features, tech constraints, scale assumptions, compliance requirements, integration targets, and success definition.",
+      "file": "src/engine/governor.ts",
+      "inputs": ["user_prompt"],
+      "outputs": ["GovernorIntent"],
+      "tools": [],
+      "modelTier": "fast",
+      "resourceConstraints": {
+        "maxTokensInput": 4000,
+        "maxTokensOutput": 2000,
+        "timeoutSeconds": 60
+      },
+      "canFail": false,
+      "failureMode": "abort_pipeline"
+    },
+    {
+      "id": "planning-architect",
+      "pillar": "planning",
+      "role": "System Architecture Design",
+      "description": "Designs the high-level system architecture, component topology, and data flow patterns. Selects appropriate architectural patterns (microservices, event-driven, CQRS, etc.) based on the GovernorIntent.",
+      "file": "src/engine/pillars/planning.ts",
+      "inputs": ["GovernorIntent", "SharedMemory"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "production-infra",
+      "pillar": "production",
+      "role": "Production Infrastructure Design",
+      "description": "Designs deployment pipelines, infrastructure-as-code, scaling strategies, observability stacks, and operational runbooks for the production system.",
+      "file": "src/engine/pillars/production.ts",
+      "inputs": ["GovernorIntent", "SharedMemory", "PlanningPillarOutput"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "edge-cases-analyst",
+      "pillar": "edge_cases",
+      "role": "Failure Mode Analysis",
+      "description": "Identifies and documents failure modes, boundary conditions, race conditions, data consistency issues, and resilience requirements. Produces mitigation strategies for each identified risk.",
+      "file": "src/engine/pillars/edgeCases.ts",
+      "inputs": ["GovernorIntent", "SharedMemory"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "integration-designer",
+      "pillar": "integration",
+      "role": "Third-Party Integration Design",
+      "description": "Designs all external API integrations, authentication flows, webhook patterns, data synchronization strategies, and third-party service contracts.",
+      "file": "src/engine/pillars/integration.ts",
+      "inputs": ["GovernorIntent", "SharedMemory"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "security-architect",
+      "pillar": "security",
+      "role": "Security Architecture and Threat Modeling",
+      "description": "Performs threat modeling using STRIDE, designs authentication/authorization architecture, identifies OWASP Top 10 risks, and produces a security control matrix.",
+      "file": "src/engine/pillars/security.ts",
+      "inputs": ["GovernorIntent", "SharedMemory"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "quality-engineer",
+      "pillar": "quality",
+      "role": "Quality and Observability Design",
+      "description": "Designs the testing strategy (unit, integration, e2e, load, chaos), observability stack (metrics, traces, logs), SLO/SLA definitions, and quality gates for CI/CD.",
+      "file": "src/engine/pillars/quality.ts",
+      "inputs": ["GovernorIntent", "SharedMemory"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "completeness-reviewer",
+      "pillar": "completeness",
+      "role": "Requirements Completeness Audit",
+      "description": "Audits the outputs of all other pillars for gaps, missing requirements, and unstated assumptions. Produces a prioritized list of unaddressed concerns.",
+      "file": "src/engine/pillars/completeness.ts",
+      "inputs": ["GovernorIntent", "SharedMemory", "AllPillarOutputs"],
+      "outputs": ["AgentOutput"],
+      "tools": ["readMemory", "writeDecision", "flagConcern", "lookupPattern", "estimateComplexity"],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 12000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "maxToolSteps": 5
+      },
+      "canFail": true,
+      "failureMode": "degrade_gracefully"
+    },
+    {
+      "id": "per-pillar-reviewer",
+      "role": "Per-Pillar Quality Gate",
+      "description": "Reviews a single pillar's agent outputs for quality, completeness, and consistency. Produces a pass/fail verdict with constructive feedback. Runs in parallel with the per-pillar prosecutor.",
+      "file": "src/engine/perPillarReviewer.ts",
+      "inputs": ["PillarAgentOutputs", "GovernorIntent"],
+      "outputs": ["PillarReviewerReport"],
+      "tools": [],
+      "modelTier": "fast",
+      "resourceConstraints": {
+        "maxTokensInput": 8000,
+        "maxTokensOutput": 1000,
+        "timeoutSeconds": 120
+      },
+      "canFail": true,
+      "failureMode": "skip_review"
+    },
+    {
+      "id": "per-pillar-prosecutor",
+      "role": "Per-Pillar Gap Detection",
+      "description": "Analyzes a single pillar's outputs for internal contradictions, gaps in reasoning, and cross-pillar conflicts flagged via shared memory. Produces a structured prosecution report with severity levels.",
+      "file": "src/engine/pillarRunner.ts",
+      "inputs": ["PillarAgentOutputs", "SharedMemory", "GovernorIntent"],
+      "outputs": ["PillarProsecutorReport"],
+      "tools": [],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 10000,
+        "maxTokensOutput": 2000,
+        "timeoutSeconds": 300,
+        "extendedThinkingEnabled": true
+      },
+      "canFail": true,
+      "failureMode": "skip_prosecution"
+    },
+    {
+      "id": "per-pillar-synthesizer",
+      "role": "Per-Pillar Output Assembly",
+      "description": "Merges all agent outputs within a pillar into a coherent, structured pillar summary including key decisions, schemas, constraints, and a master record markdown document.",
+      "file": "src/engine/perPillarSynthesizer.ts",
+      "inputs": ["PillarAgentOutputs", "ReviewerReport", "ProsecutorReport"],
+      "outputs": ["PillarSummary", "SynthesizerOutput"],
+      "tools": [],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 12000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300
+      },
+      "canFail": true,
+      "failureMode": "fallback_to_agent_concat"
+    },
+    {
+      "id": "global-prosecutor",
+      "role": "Cross-Pillar Gap Detection",
+      "description": "Analyzes the combined output of all 7 pillars for systemic gaps, cross-cutting contradictions, and unresolved architectural tensions. Produces a verdict (approved / requires_revision) and a list of gaps with severity levels.",
+      "file": "src/engine/prosecutor.ts",
+      "inputs": ["AllPillarOutputs", "GovernorIntent", "SharedMemoryConcerns"],
+      "outputs": ["ProsecutorResult"],
+      "tools": [],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 20000,
+        "maxTokensOutput": 4000,
+        "timeoutSeconds": 300,
+        "extendedThinkingEnabled": true
+      },
+      "canFail": false,
+      "failureMode": "abort_with_partial_blueprint"
+    },
+    {
+      "id": "final-synthesizer",
+      "role": "Blueprint Assembly",
+      "description": "Merges all pillar outputs, prosecutor findings, and rerun results into the final Blueprint. Produces all 10 sections: executive summary, architecture, data model, API contracts, security model, edge cases, testing strategy, deployment, launch checklist, and technical debt.",
+      "file": "src/engine/synthesizer.ts",
+      "inputs": ["AllPillarOutputs", "ProsecutorResult", "GovernorIntent"],
+      "outputs": ["Blueprint", "BlueprintSections"],
+      "tools": [],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 20000,
+        "maxTokensOutput": 8000,
+        "timeoutSeconds": 300
+      },
+      "canFail": false,
+      "failureMode": "abort_with_partial_blueprint"
+    },
+    {
+      "id": "bundle-generator",
+      "role": "Claude Code Bundle Generation",
+      "description": "Generates the Claude Code–ready output bundle from the final Blueprint. Produces CLAUDE.md, settings.json, hookify rules, and agent definition files.",
+      "file": "src/engine/bundleGenerator.ts",
+      "inputs": ["Blueprint", "BlueprintSections"],
+      "outputs": ["OutputBundle"],
+      "tools": [],
+      "modelTier": "pro",
+      "resourceConstraints": {
+        "maxTokensInput": 16000,
+        "maxTokensOutput": 8000,
+        "timeoutSeconds": 300
+      },
+      "canFail": true,
+      "failureMode": "blueprint_without_bundle"
+    }
+  ],
+  "tools": [
+    {
+      "name": "readMemory",
+      "description": "Read architectural decisions from the shared session memory store. Use at the start of every agent loop to check what peer agents have decided.",
+      "parameters": {
+        "pillar": { "type": "string", "description": "Pillar to read from, or 'all' for cross-pillar reads" }
+      },
+      "sideEffects": false
+    },
+    {
+      "name": "writeDecision",
+      "description": "Record a key architectural decision to shared session memory so downstream agents can build on it consistently.",
+      "parameters": {
+        "key": { "type": "string", "description": "Decision identifier, e.g. 'database_choice'" },
+        "decision": { "type": "string", "description": "The decision made" },
+        "rationale": { "type": "string", "description": "Why this decision was made" }
+      },
+      "sideEffects": true
+    },
+    {
+      "name": "flagConcern",
+      "description": "Flag a cross-cutting risk or concern for the prosecutor to evaluate. Use for risks that span multiple pillars.",
+      "parameters": {
+        "concern": { "type": "string", "description": "Description of the concern" },
+        "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+        "affectedPillars": { "type": "array", "items": { "type": "string" } }
+      },
+      "sideEffects": true
+    },
+    {
+      "name": "lookupPattern",
+      "description": "Query the built-in architectural knowledge base for proven patterns and common pitfalls in a specific domain.",
+      "parameters": {
+        "domain": { "type": "string", "description": "Architecture domain, e.g. 'caching', 'auth', 'messaging'" }
+      },
+      "sideEffects": false
+    },
+    {
+      "name": "estimateComplexity",
+      "description": "Classify the implementation complexity of a specific component using Fibonacci story points.",
+      "parameters": {
+        "component": { "type": "string", "description": "Component or feature to estimate" }
+      },
+      "sideEffects": false
+    }
+  ],
+  "sharedMemory": {
+    "implementation": "AsyncLocalStorage",
+    "scope": "per-session",
+    "maxDecisionsPerSession": 500,
+    "maxSessions": 200,
+    "evictionPolicy": "LRU",
+    "crossPillarRead": true,
+    "note": "In-process only — correct for single-replica deployments. For multi-replica, use Redis-backed memory."
+  },
+  "security": {
+    "inputSanitization": "User prompts are passed to GovernorIntent extraction — no direct injection into LLM system prompts",
+    "byokEncryption": "AES-256-GCM with per-operation IV; keys derived from CONFIG_ENCRYPTION_KEY master secret",
+    "csrfProtection": "SameSite=Strict session cookie",
+    "rateLimiting": "Per-IP and per-endpoint via express-rate-limit",
+    "noSecretsInCode": true,
+    "noEval": true,
+    "noPathTraversal": true
+  },
+  "observability": {
+    "logging": "pino (structured JSON)",
+    "events": "SSE EngineEvent stream (38 event types)",
+    "checkpoints": "Per-stage checkpoint in Redis/SQLite",
+    "healthEndpoint": "/health",
+    "metricsEndpoint": "/api/v1/metrics (admin-only)"
+  }
+}

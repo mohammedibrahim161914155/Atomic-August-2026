@@ -1,0 +1,15 @@
+{
+  "model": "anthropic/claude-4.6-sonnet",
+  "instructions": "./CLAUDE.md",
+  "mcp": {
+    "servers": {
+      "atomic": {
+        "command": "npx",
+        "args": ["-y", "atomic-mcp"],
+        "env": {
+          "ATOMIC_API_URL": "http://localhost:5000"
+        }
+      }
+    }
+  }
+}

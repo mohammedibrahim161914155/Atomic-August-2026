@@ -1,0 +1,35 @@
+# Atomic — Production compose
+# Usage:
+#   cp .env.example .env && nano .env          # configure secrets first
+#   docker compose up -d --build
+services:
+  atomic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: atomic
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - CONFIG_ENCRYPTION_KEY=${CONFIG_ENCRYPTION_KEY}
+      - ALLOWED_ORIGIN=${ALLOWED_ORIGIN:-http://localhost:3000}
+      - SESSIONS_DIR=/data/sessions
+    volumes:
+      - atomic-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+volumes:
+  atomic-data:
+    driver: local
