@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
-![Tests](https://img.shields.io/badge/tests-244%20passing-green)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
+![Tests](https://img.shields.io/badge/tests-268%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -10,6 +10,21 @@ Atomic is an enterprise-grade, zero-inference-cost multi-agent AI system that ge
 > **Zero inference cost**: Atomic itself makes no LLM calls — it delegates 100 % of inference to your host model (OpenRouter, OpenAI, Anthropic, Google, xAI, Mistral, DeepSeek, ZAI, or MiniMax). Bring your own API key.
 
 ---
+
+## What's New in 2.1.0 — Agentic Pipelines (August 2026)
+
+All four pipelines now run on a shared **agentic core** distilled from
+studying the actual source code of OpenAI Codex, OpenCode, Kimi, Kilo Code,
+and OpenDesign. The Blueprint pipeline gets the flagship upgrade: a
+verifier-repair loop that scores the synthesized blueprint across four
+weighted quality roles (accuracy, completeness, actionability, clarity),
+counts MUST-FIX blockers, and triggers up to three targeted repair rounds
+before shipping — backed by content-addressed stage snapshots, per-run
+step and token budgets, abort-safe sub-agent supervision, and Codex-style
+plan mode with mid-run steering. Feature Creator, Tool Builder, and Agent
+Builder received the same verifier loop, budgets, and (for Agent Builder)
+supervisor coordination, plus a new runtime-tunable verdict/budget
+configuration API.
 
 ## What's New in 2.0.0 (August 2026)
 
@@ -201,7 +216,7 @@ npm run mcp
 ## Testing & CI
 
 ```bash
-npm test            # 244 unit + integration tests (vitest)
+npm test            # 268 unit + integration tests (vitest)
 npm run test:http   # 27 end-to-end HTTP tests (supertest, in-process app)
 npm run lint        # TypeScript check + eslint (zero-error policy)
 npm run build       # Client + server production bundles
@@ -271,6 +286,9 @@ All model IDs are maintained in `src/models/registry.ts` — the single source o
 │   │   ├── providerHealthMonitor.ts # P50/P95 latency + error rate per model
 │   │   ├── blueprintStore.ts    # SQLite persistence with FTS5 full-text search
 │   │   ├── checkpoint.ts        # Session state persistence
+│   │   ├── agenticCore.ts       # Shared agentic engine (verdicts, turns, snapshots, supervisor, plans)
+│   │   ├── blueprintVerifier.ts # Blueprint verifier-repair loop (4-role quality composite)
+│   │   ├── pipelineVerifier.ts  # Shared verifier-repair loop for secondary pipelines
 │   │   ├── openrouter.ts        # Multi-provider Vercel AI SDK layer
 │   │   ├── config.ts            # ModelConfig, ProviderSlug, SERVER_DEFAULT_CONFIG
 │   │   └── types.ts             # All shared TypeScript types

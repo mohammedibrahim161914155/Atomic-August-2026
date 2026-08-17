@@ -2,6 +2,43 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.1.0] — August 2026
+
+### Added
+- `agenticCore.ts` — a shared agentic engine distilled from the pipelines of
+  OpenAI Codex, OpenCode, Kimi, Kilo Code, and OpenDesign:
+  - **Verdict engine**: role-weighted composite scoring, MUST-FIX blocker
+    counting, capped repair rounds, and deterministic fallback policies
+    (`ship_best` / `ship_last` / `ship_highest`).
+  - **Turn runner**: per-run step and token budgets with an 80%-warning /
+    hard-cap abort model, error-classified retries, and optional per-step
+    verification.
+  - **Stage snapshots** (Kilo Code pattern): content-addressed checkpoints
+    of every pipeline stage with undo/restore.
+  - **Sub-agent supervisor** (Kimi pattern): abort-safe fan-out with derived
+    signals, per-task retries, and aggregate status reporting.
+  - **Plan mode + steering** (Codex pattern): milestone decomposition,
+    persisted plans, and a mid-run course-correction queue.
+  - **Pipeline defaults registry**: per-pipeline verdict and budget
+    configuration, overridable at runtime via the API and persisted
+    across restarts.
+- `blueprintVerifier.ts` — the Blueprint pipeline's verifier-repair loop:
+  structural validation gates plus a four-role quality composite
+  (accuracy / completeness / actionability / clarity) with targeted repair
+  of only the weakest sections.
+- `pipelineVerifier.ts` — shared verifier-repair loop used by the Feature
+  Creator, Tool Builder, and Agent Builder pipelines.
+- New API endpoints: `/generate-plan`, plan retrieval, steer queue and
+  history, stage snapshots + undo, and per-pipeline
+  `/pipelines/:name/config` overrides.
+- 24 new `agenticCore` unit tests covering the verdict engine, turn budgets,
+  snapshot lifecycle, supervisor fan-out, and the verifier loop.
+
+### Changed
+- All four pipelines (Blueprint, Feature Creator, Tool Builder, Agent
+  Builder) now run their final output through the verifier-repair loop
+  with stage snapshots, budgets, and rich SSE progress events.
+
 ## [2.0.0] — August 2026
 
 ### Added
