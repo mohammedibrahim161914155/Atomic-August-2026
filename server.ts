@@ -28,6 +28,10 @@ import {
   resolvePipelineDefaults,
 } from './src/engine/agenticCore';
 import { getStore } from './src/engine/store';
+import { answerElicitations, pendingElicitations, listElicitationHistory } from './src/engine/elicitation';
+import { listEffectiveTiers, setOperationTier } from './src/engine/permissionRegistry';
+import { listLedger, summarizeLedger } from './src/engine/qualityLedger';
+import { listRunSummaries } from './src/engine/runSummary';
 import { Blueprint, BlueprintSchema, GovernorIntent, PillarOutput, GenerationMode, PillarName } from './src/engine/types';
 import { runPillar } from './src/engine/pillarRunner';
 import { runProsecutor } from './src/engine/prosecutor';
@@ -1670,6 +1674,102 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
       return;
     }
     res.json({ ok: true, snapshot });
+  });
+
+  // ── Elicitation endpoints (Codex elicitation + Kilo Code question tool) ──
+  // POST /api/v1/sessions/:id/answer-elicitation — answer model-asked
+  // clarifying questions. The pipeline asks via askElicitation; the UI
+  // answers here. Unanswered questions auto-deny after their deadline.
+  v1.post('/sessions/:id/answer-elicitation', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const body = req.body ?? {};
+    const answers = Array.isArray(body.answers)
+      ? (body.answers as Array<{ id?: string; answer?: string }>).filter(a => a && a.id && typeof a.answer === 'string')
+      : [];
+    if (answers.length === 0) {
+      res.status(400).json({ error: 'answers must be a non-empty array of { id, answer }' });
+      return;
+    }
+    const answered = await answerElicitations(id, answers.map(a => ({ id: a.id!, answer: a.answer! }))); // eslint-disable-line @typescript-eslint/no-non-null-assertion
+    res.json({ ok: true, answered });
+  });
+
+  // GET /api/v1/sessions/:id/elicitations — pending + answered model-asked
+  // questions (typed: clarify/confirm/choose with options).
+  v1.get('/sessions/:id/elicitations', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const pending = await pendingElicitations(id);
+    const history = await listElicitationHistory(id);
+    res.json({ ok: true, pending: pending.elicitations, has_pending: pending.has_pending, history });
+  });
+
+  // ── Permission endpoints (Codex execpolicy + Kilo Code permission) ──────
+  // GET /api/v1/sessions/:id/permissions — effective permission tier per
+  // pipeline operation (session overrides merged over global over defaults).
+  v1.get('/sessions/:id/permissions', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const tiers = await listEffectiveTiers(id);
+    res.json({ ok: true, tiers });
+  });
+
+  // PATCH /api/v1/sessions/:id/permissions — set the permission tier for one
+  // pipeline operation. Tiers: full-auto (default) | ask | deny.
+  v1.patch('/sessions/:id/permissions', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const body = req.body ?? {};
+    const { operation, tier } = body;
+    const validOperations = ['generate', 'repair', 'rerun-pillar', 'steer', 'plan', 'compact', 'verifier-loop', 'snapshot', 'undo'] as const;
+    const validTiers = ['full-auto', 'ask', 'deny'] as const;
+    if (!validOperations.includes(operation) || !validTiers.includes(tier)) {
+      res.status(400).json({ error: 'operation must be one of ' + validOperations.join(', ') + ' and tier one of ' + validTiers.join(', ') });
+      return;
+    }
+    const resolved = await setOperationTier(id, operation, tier);
+    res.json({ ok: true, operation, tier: resolved });
+  });
+
+  // ── Quality ledger endpoints (OpenDesign conformance/ratchet) ──────────
+  // GET /api/v1/sessions/:id/quality/:pipeline — verifier-round ledger +
+  // drift summary for one pipeline (composite history, ratchet high-water
+  // mark, average, shipped rounds).
+  v1.get('/sessions/:id/quality/:pipeline', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    const pipeline = (req.params as { pipeline?: string }).pipeline;
+    if (!isValidSessionId(id) || !pipeline) {
+      res.status(400).json({ error: 'Invalid session id or pipeline name' });
+      return;
+    }
+    const entries = await listLedger({ session: id, pipeline });
+    res.json({ ok: true, pipeline, entries, summary: summarizeLedger(entries) });
+  });
+
+  // ── Run summary endpoints (Kilo Code kilo-telemetry pattern) ───────────
+  // GET /api/v1/sessions/:id/runs — structured performance summary of every
+  // run in the session (duration, tokens, estimated cost, verdict, drift).
+  v1.get('/sessions/:id/runs', apiLimiter, async (req, res): Promise<void> => {
+    const id = (req.params as { id: string }).id;
+    if (!isValidSessionId(id)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+    const runs = await listRunSummaries(id);
+    res.json({ ok: true, runs });
   });
 
   // GET /api/v1/pipelines/:name/config — current verdict/budget defaults for

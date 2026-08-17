@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue)
-![Tests](https://img.shields.io/badge/tests-268%20passing-green)
+![Version](https://img.shields.io/badge/version-2.2.0-blue)
+![Tests](https://img.shields.io/badge/tests-299%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -10,6 +10,29 @@ Atomic is an enterprise-grade, zero-inference-cost multi-agent AI system that ge
 > **Zero inference cost**: Atomic itself makes no LLM calls — it delegates 100 % of inference to your host model (OpenRouter, OpenAI, Anthropic, Google, xAI, Mistral, DeepSeek, ZAI, or MiniMax). Bring your own API key.
 
 ---
+
+## What's New in 2.2.0 — Comparative Gap-Closing Layer (August 2026)
+
+Every pipeline was systematically compared against the actual source
+repositories of OpenAI Codex, OpenCode, Kimi CLI, Kilo Code, and
+OpenDesign across features, capabilities, gaps, and engineering quality.
+Five concrete gaps were identified and closed with real working logic:
+
+- **Context auto-compaction** (Codex pattern): utilisation-aware compaction
+  before every large synthesis call with warn/compact/abort thresholds and
+  `context.compaction` SSE events.
+- **Elicitation queues** (Codex + Kilo Code patterns): typed model-asked
+  clarifying questions with options, fallbacks, auto-deny deadlines, and
+  answerable mid-run via the API.
+- **Permission tiers** (Codex + Kilo Code patterns): nine pipeline
+  operations under `full-auto` | `ask` | `deny` tiers with persistent
+  per-session overrides.
+- **Quality ledger with drift detection** (OpenDesign ratchet pattern):
+  every verifier round is recorded with high-water marks and quality-drift
+  alerts.
+- **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
+  estimation, verdict, and drift per run — queryable via the new `/runs`,
+  `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
 
 ## What's New in 2.1.0 — Agentic Pipelines (August 2026)
 

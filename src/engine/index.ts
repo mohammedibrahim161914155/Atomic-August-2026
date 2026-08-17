@@ -110,6 +110,16 @@ export async function generateBlueprint(
     const startTime = Date.now();
     const sessionId = existingSessionId ?? generateSessionId();
 
+    // v2.2 — Kilo Code-style run telemetry: open the run record at pipeline
+    // start so duration, tokens, verdict and drift are readable via
+    // GET /api/v1/sessions/:id/runs (closed at completion below).
+    void (async () => {
+      try {
+        const { recordRunStart } = await import('./runSummary');
+        await recordRunStart({ session: sessionId, pipeline: 'blueprint', model: config.proModel });
+      } catch { /* telemetry best-effort */ }
+    })();
+
     // Propagate sessionId through AsyncLocalStorage so agent tools
     // can read/write shared memory without polluting every function signature.
     sessionIdStorage.enterWith(sessionId);
@@ -349,6 +359,26 @@ export async function generateBlueprint(
       } catch (err: unknown) {
         engineLog.warn({ err }, '[verdict] checkpoint of verdict outcome failed — non-fatal');
       }
+
+      // v2.2 — OpenDesign-style quality ledger: persist every verifier
+      // round so the run's quality trajectory (ratchet high-water mark,
+      // drift) is visible through GET /api/v1/sessions/:id/quality/blueprint.
+      try {
+        const { recordVerifierRound } = await import('./qualityLedger');
+        for (const round of verifierResult.outcome.rounds) {
+          await recordVerifierRound({
+            session: sessionId,
+            pipeline: 'blueprint',
+            round: round.n,
+            composite: round.composite,
+            mustFix: round.mustFix,
+            verdict: round.verdict,
+            scores: round.scores,
+          });
+        }
+      } catch (err: unknown) {
+        engineLog.warn({ err }, '[ledger] recording verifier rounds failed — non-fatal');
+      }
     } catch (err: unknown) {
       engineLog.error({ err }, '[verifier] verifier loop failed — shipping pre-verifier blueprint');
     }
@@ -364,6 +394,35 @@ export async function generateBlueprint(
     });
 
     emit({ type: 'complete', sessionId });
+
+    // v2.2 — Kilo Code-style run summary: close the run record with terminal
+    // metrics (duration, tokens, verdict composite, drift flag) readable via
+    // GET /api/v1/sessions/:id/runs.
+    void (async () => {
+      try {
+        const { recordRunEnd } = await import('./runSummary');
+        let driftReport: { drifted: boolean } | null = null;
+        try {
+          const { evaluateDrift } = await import('./qualityLedger');
+          driftReport = await evaluateDrift({
+            session: sessionId,
+            pipeline: 'blueprint',
+            current: blueprint.quality_score ?? 0,
+          });
+        } catch { /* drift eval best-effort */ }
+        await recordRunEnd({
+          session: sessionId,
+          runId: sessionId,
+          status: 'success',
+          tokens_used: blueprint.total_tokens ?? 0,
+          verifier_composite: blueprint.quality_score ?? null,
+          verifier_verdict: 'ship',
+          quality_drifted: driftReport?.drifted ?? null,
+        });
+      } catch {
+        /* telemetry best-effort */
+      }
+    })();
 
     // ── Observability: pipeline.run span ──────────────────────────────────────
     spanLog(engineLog, 'atomic.pipeline.run', {

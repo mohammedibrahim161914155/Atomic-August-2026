@@ -380,6 +380,18 @@ export async function runAgentBuilderPipeline(
 ): Promise<AgentBlueprint> {
     emitFn({ type: 'governor_start', prompt: input.agentRole });
 
+  // v2.2 — Kilo Code-style run telemetry: open a run record so duration,
+  // tokens, verdict and drift are readable via GET /api/v1/sessions/:id/runs.
+  const sessionId = deriveSessionId(input.agentRole);
+  let runId: string;
+  let tokensUsed = 0;
+  try {
+    const { recordRunStart } = await import('../../engine/runSummary');
+    runId = await recordRunStart({ session: sessionId, pipeline: 'agent-builder', model: config.proModel });
+  } catch {
+    runId = sessionId;
+  }
+
   // Agentic Core supervisor fan-out (Kimi + OpenCode pattern): each pillar
   // runs as a supervised sub-agent with a derived abort signal; partial
   // failure is contained per-task and reported via subagent.* events so a
@@ -410,7 +422,7 @@ export async function runAgentBuilderPipeline(
     `\nCapabilities: ${input.agentCapabilities}` +
     `\nConstraints: ${input.agentConstraints}`;
 
-    const { data } = await withRetry(
+    const synthesisResult = await withRetry(
     () => generateJson<AgentBlueprint>(
       synthesisPrompt,
       config,
@@ -421,6 +433,8 @@ export async function runAgentBuilderPipeline(
     signal,
     'agent-builder:synthesizer',
   );
+  tokensUsed += (synthesisResult as any)?.tokens_used ?? 0;
+  const { data } = synthesisResult;
 
   // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
   // composite verdict) — weak first passes are repaired up to N rounds
@@ -456,6 +470,25 @@ export async function runAgentBuilderPipeline(
     } catch {
       /* checkpoint best-effort */
     }
+
+    // v2.2 — OpenDesign-style quality ledger: persist every verifier round
+    // so the run's quality trajectory is visible via the quality API.
+    try {
+      const { recordVerifierRound } = await import('../../engine/qualityLedger');
+      for (const round of outcome.rounds) {
+        await recordVerifierRound({
+          session: supervisorId,
+          pipeline: 'agent-builder',
+          round: round.n,
+          composite: round.composite,
+          mustFix: round.mustFix,
+          verdict: round.verdict,
+          scores: round.scores,
+        });
+      }
+    } catch {
+      /* ledger best-effort */
+    }
   } catch (err) {
     log.error({ err }, '[agent-builder] verifier loop failed — shipping pre-verifier candidate');
   }
@@ -472,6 +505,30 @@ export async function runAgentBuilderPipeline(
     candidate.agentBoundaries.doesNot.length >= 3,
   ];
   candidate.qualityScore = Math.round((qualityChecks.filter(Boolean).length / qualityChecks.length) * 100);
+
+  // v2.2 — close the run record with terminal metrics (fire-and-forget).
+  void (async () => {
+    try {
+      const { recordRunEnd } = await import('../../engine/runSummary');
+      let driftReport: { drifted: boolean } | null = null;
+      try {
+        const { evaluateDrift } = await import('../../engine/qualityLedger');
+        driftReport = await evaluateDrift({ session: sessionId, pipeline: 'agent-builder', current: candidate.qualityScore });
+      } catch { /* drift eval best-effort */ }
+      await recordRunEnd({
+        session: sessionId,
+        runId,
+        status: 'success',
+        tokens_used: tokensUsed,
+        verifier_composite: candidate.qualityScore,
+        verifier_verdict: 'ship',
+        quality_drifted: driftReport?.drifted ?? null,
+      });
+    } catch {
+      /* telemetry best-effort */
+    }
+  })();
+
   return candidate;
 }
 

@@ -275,7 +275,12 @@ export type EngineEvent =
   // ■■ Agentic Core v2.1 — snapshots + steering (Kilo pattern) ■■
   | { type: 'snapshot.captured'; stage: string; snapshotId: string }
   | { type: 'snapshot.restored'; snapshotId: string }
-  | { type: 'steer.received'; message: string };
+  | { type: 'steer.received'; message: string }
+  // ■■ v2.2 — context auto-compaction (Codex compact*.rs pattern) ■■
+  | { type: 'context.compaction'; message: string }
+  // ■■ v2.2 — elicitation (Codex elicitation + Kilo question tool) ■■
+  | { type: 'elicitation.asked'; question: string; kind: string }
+  | { type: 'elicitation.answered'; question: string }
 
 /** Human-readable verdict strings emitted by the agentic verdict engine. */
 export type AgenticVerdict = 'ship' | 'repair' | 'fail';

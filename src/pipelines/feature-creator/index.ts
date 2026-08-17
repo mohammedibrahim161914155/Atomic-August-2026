@@ -292,6 +292,18 @@ export async function runFeatureCreatorPipeline(
 ): Promise<FeatureBlueprint> {
   emit({ type: 'governor_start', prompt: input.featureDescription }, emitFn);
 
+  // Kilo Code-style run telemetry: open a run record so duration, tokens,
+  // verdict and drift are readable via GET /api/v1/sessions/:id/runs.
+  const sessionId = deriveSessionId(input.featureDescription);
+  let runId: string;
+  let tokensUsed = 0;
+  try {
+    const { recordRunStart } = await import('../../engine/runSummary');
+    runId = await recordRunStart({ session: sessionId, pipeline: 'feature-creator', model: config.proModel });
+  } catch {
+    runId = sessionId;
+  }
+
   // Run all 8 pillars in parallel
   const pillarOutputs = await Promise.all(
     PILLARS.map(p => runPillar(p, input, config, emitFn, signal))
@@ -300,11 +312,40 @@ export async function runFeatureCreatorPipeline(
   emit({ type: 'governor_done', intent: { app_name: 'Feature Creator', description: input.featureDescription } as any }, emitFn);
 
   // Synthesize into a structured blueprint
-  const synthesisPrompt = PILLARS.map((p, i) =>
+  const rawSynthesisPrompt = PILLARS.map((p, i) =>
     `=== ${p.name.toUpperCase()} ===\n${pillarOutputs[i]}`
   ).join('\n\n') + `\n\nFeature: ${input.featureDescription}\nCodebase: ${input.codebaseContext.slice(0, 2000)}`;
 
-  const { data } = await withRetry(
+  // Codex-style context auto-compaction: when the assembled context exceeds
+  // the pro model's window, summarise the pillar outputs and continue
+  // instead of truncating reactively.
+  let synthesisPrompt = rawSynthesisPrompt;
+  let compacted = false;
+  let compactTokens = 0;
+  try {
+    const { compactIfNeeded } = await import('../../engine/contextCompactor');
+    const { estimateTokens } = await import('../../engine/contextBudget');
+    const capacity = 200_000; // conservative pro-model window
+    const used = estimateTokens(rawSynthesisPrompt) + 8_000;
+    const compactedResult = await compactIfNeeded({
+      usedTokens: used,
+      capacity,
+      history: [rawSynthesisPrompt],
+      config,
+      signal,
+    });
+    synthesisPrompt = compactedResult.context || rawSynthesisPrompt;
+    compacted = compactedResult.compacted;
+    compactTokens = compactedResult.tokens_used;
+    if (compactedResult.decision.action === 'warn' || compactedResult.decision.action === 'compact') {
+      emitFn({ type: 'context.compaction', message: `Context ${compactedResult.decision.action} at ${(compactedResult.decision.utilization * 100).toFixed(0)}% utilisation` } as EngineEvent);
+    }
+  } catch (err) {
+    log.error({ err }, '[feature-creator] compaction check failed — using raw context');
+    compacted = false;
+  }
+
+  const synthesisResult = await withRetry(
     () => generateJson<FeatureBlueprint>(
       synthesisPrompt,
       config,
@@ -315,6 +356,8 @@ export async function runFeatureCreatorPipeline(
     signal,
     'feature-creator:synthesizer',
   );
+  tokensUsed += (synthesisResult as any)?.tokens_used ?? 0;
+  const { data } = synthesisResult;
 
   // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
   // composite verdict) — weak first passes are repaired up to N rounds
@@ -351,6 +394,26 @@ export async function runFeatureCreatorPipeline(
     } catch {
       /* checkpoint best-effort */
     }
+
+    // OpenDesign-style quality ledger: persist every verifier round so the
+    // run's quality trajectory (ratchet high-water mark, drift) is visible
+    // through GET /api/v1/sessions/:id/quality/:pipeline.
+    try {
+      const { recordVerifierRound } = await import('../../engine/qualityLedger');
+      for (const round of outcome.rounds) {
+        await recordVerifierRound({
+          session: sessionId,
+          pipeline: 'feature-creator',
+          round: round.n,
+          composite: round.composite,
+          mustFix: round.mustFix,
+          verdict: round.verdict,
+          scores: round.scores,
+        });
+      }
+    } catch {
+      /* ledger best-effort */
+    }
   } catch (err) {
     log.error({ err }, '[feature-creator] verifier loop failed — shipping pre-verifier candidate');
   }
@@ -365,6 +428,37 @@ export async function runFeatureCreatorPipeline(
     candidate.implementationOrder.length > 0,
   ];
   candidate.qualityScore = Math.round((hasAllSections.filter(Boolean).length / hasAllSections.length) * 100);
+
+  // Kilo Code-style run summary: close the run record with terminal metrics
+  // (duration, tokens, verdict, drift) — readable via
+  // GET /api/v1/sessions/:id/runs.
+  void (async () => {
+    try {
+      const { recordRunEnd } = await import('../../engine/runSummary');
+      const driftReport = await (async () => {
+        try {
+          const { evaluateDrift } = await import('../../engine/qualityLedger');
+          return await evaluateDrift({
+            session: sessionId,
+            pipeline: 'feature-creator',
+            current: candidate.qualityScore,
+          });
+        } catch { return null; }
+      })();
+      await recordRunEnd({
+        session: sessionId,
+        runId: runId,
+        status: 'success',
+        tokens_used: tokensUsed + compactTokens,
+        verifier_composite: hasAllSections.filter(Boolean).length > 0 ? candidate.qualityScore : null,
+        verifier_verdict: 'ship',
+        quality_drifted: driftReport?.drifted ?? null,
+        compacted,
+      });
+    } catch {
+      /* telemetry best-effort */
+    }
+  })();
 
   return candidate;
 }

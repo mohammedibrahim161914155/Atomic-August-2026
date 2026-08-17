@@ -2,6 +2,45 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.2.0] — August 2026
+
+### Added — comparative gap-closing layer (Codex · OpenCode · Kimi · Kilo Code · OpenDesign)
+
+A systematic source-repo comparison against OpenAI Codex (Rust), OpenCode (Go),
+Kimi CLI, Kilo Code (TS), and OpenDesign (TS) surfaced five concrete capability
+gaps. All five were closed with real working logic, full unit coverage, and
+production smoke verification.
+
+- `contextCompactor.ts` — **context auto-compaction** (Codex `compact*.rs`
+  pattern). Every pipeline checks utilisation before its big synthesis call
+  (warn ≥80%, auto-compact ≥90% against a 200k-token pro-model window, abort
+  ≥98%) and emits `context.compaction` SSE events. Over-long runs can no longer
+  push a single prompt past the model window.
+- `elicitation.ts` — **model-driven elicitation queues** (Codex elicitation +
+  Kilo Code question tool). Pipelines can ask typed clarifying questions
+  (`clarify`/`confirm`/`choose` with options, fallback answers, auto-deny
+  deadlines). Questions are persisted, auto-expired, answerable mid-run, and
+  fully auditable via the API.
+- `permissionRegistry.ts` — **operation permission tiers** (Codex execpolicy +
+  Kilo Code permission model). Nine pipeline operations (`generate`, `repair`,
+  `rerun-pillar`, `steer`, `plan`, `compact`, `verifier-loop`, `snapshot`,
+  `undo`) sit under `full-auto` | `ask` | `deny` tiers with global defaults and
+  per-session overrides persisted across restarts.
+- `qualityLedger.ts` — **quality ledger with drift detection** (OpenDesign
+  conformance/ratchet pattern). Every verifier round of every run is recorded;
+  the ledger exposes high-water marks, rolling averages, and drift alerts when
+  quality slides below the ratchet tolerance.
+- `runSummary.ts` — **per-run telemetry** (Kilo Code `kilo-telemetry` pattern).
+  Each run records duration, token usage, cost (70/30 input/output split across
+  six known model rates), verifier verdict, and quality drift.
+- Eight new API endpoints: `/answer-elicitation`, `/elicitations`,
+  `/permissions` (GET + PATCH), `/quality/:pipeline`, `/runs` — all
+  input-validated and rate-limited, exercised by new HTTP integration tests.
+- Pipeline integration: auto-compaction, ledger recording, and run telemetry
+  wired into the **Blueprint**, **Feature Creator**, **Tool Builder**, and
+  **Agent Builder** pipelines; `EngineEvent` extended with the new event
+  taxonomy.
+
 ## [2.1.0] — August 2026
 
 ### Added

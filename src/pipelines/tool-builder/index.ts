@@ -299,6 +299,18 @@ export async function runToolBuilderPipeline(
 ): Promise<ToolBlueprint> {
   emitFn({ type: 'governor_start', prompt: input.toolConcept });
 
+  // v2.2 — Kilo Code-style run telemetry: open a run record so duration,
+  // tokens, verdict and drift are readable via GET /api/v1/sessions/:id/runs.
+  const sessionId = deriveSessionId(input.toolConcept);
+  let runId: string;
+  let tokensUsed = 0;
+  try {
+    const { recordRunStart } = await import('../../engine/runSummary');
+    runId = await recordRunStart({ session: sessionId, pipeline: 'tool-builder', model: config.proModel });
+  } catch {
+    runId = sessionId;
+  }
+
   const pillarOutputs = await Promise.all(
     PILLARS.map(p => runPillar(p, input, config, emitFn, signal))
   );
@@ -311,7 +323,7 @@ export async function runToolBuilderPipeline(
     `\nTarget Agent: ${input.targetAgent}` +
     (input.externalSystem ? `\nExternal System: ${input.externalSystem}` : '');
 
-  const { data } = await withRetry(
+  const synthesisResult = await withRetry(
     () => generateJson<ToolBlueprint>(
       synthesisPrompt,
       config,
@@ -322,6 +334,8 @@ export async function runToolBuilderPipeline(
     signal,
     'tool-builder:synthesizer',
   );
+  tokensUsed += (synthesisResult as any)?.tokens_used ?? 0;
+  const { data } = synthesisResult;
 
     // Agentic Core verifier loop (Codex validate-then-repair + OpenDesign
   // composite verdict) — weak first passes are repaired up to N rounds
@@ -331,7 +345,6 @@ export async function runToolBuilderPipeline(
   try {
     const { verifyPipelineOutput } = await import('../../engine/pipelineVerifier');
     const { resolvePipelineDefaults, captureStageSnapshot } = await import('../../engine/agenticCore');
-    const sessionId = deriveSessionId(input.toolConcept);
     const snap = await captureStageSnapshot(
       sessionId,
       'synthesized',
@@ -358,6 +371,25 @@ export async function runToolBuilderPipeline(
     } catch {
       /* checkpoint best-effort */
     }
+
+    // v2.2 — OpenDesign-style quality ledger: persist every verifier round
+    // so the run's quality trajectory is visible via the quality API.
+    try {
+      const { recordVerifierRound } = await import('../../engine/qualityLedger');
+      for (const round of outcome.rounds) {
+        await recordVerifierRound({
+          session: sessionId,
+          pipeline: 'tool-builder',
+          round: round.n,
+          composite: round.composite,
+          mustFix: round.mustFix,
+          verdict: round.verdict,
+          scores: round.scores,
+        });
+      }
+    } catch {
+      /* ledger best-effort */
+    }
   } catch (err) {
     log.error({ err }, '[tool-builder] verifier loop failed — shipping pre-verifier candidate');
   }
@@ -374,6 +406,30 @@ export async function runToolBuilderPipeline(
     candidate.usageExamples.length > 0,
   ];
   candidate.qualityScore = Math.round((hasAll.filter(Boolean).length / hasAll.length) * 100);
+
+  // v2.2 — close the run record with terminal metrics (fire-and-forget).
+  void (async () => {
+    try {
+      const { recordRunEnd } = await import('../../engine/runSummary');
+      let driftReport: { drifted: boolean } | null = null;
+      try {
+        const { evaluateDrift } = await import('../../engine/qualityLedger');
+        driftReport = await evaluateDrift({ session: sessionId, pipeline: 'tool-builder', current: candidate.qualityScore });
+      } catch { /* drift eval best-effort */ }
+      await recordRunEnd({
+        session: sessionId,
+        runId,
+        status: 'success',
+        tokens_used: tokensUsed,
+        verifier_composite: candidate.qualityScore,
+        verifier_verdict: 'ship',
+        quality_drifted: driftReport?.drifted ?? null,
+      });
+    } catch {
+      /* telemetry best-effort */
+    }
+  })();
+
   return candidate;
 }
 
