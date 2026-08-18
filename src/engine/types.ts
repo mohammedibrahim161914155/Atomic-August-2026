@@ -281,6 +281,22 @@ export type EngineEvent =
   // ■■ v2.2 — elicitation (Codex elicitation + Kilo question tool) ■■
   | { type: 'elicitation.asked'; question: string; kind: string }
   | { type: 'elicitation.answered'; question: string }
+  // ■■ v2.6.0 — run audit ledger (Codex Documentation.md pattern) ■■
+  | { type: 'audit.stage_start'; stage: string; label: string }
+  | { type: 'audit.stage_end'; stage: string; label: string; verdict: 'success' | 'partial' | 'failed' | 'skipped' | 'aborted'; tokens_used: number; duration_ms?: number }
+  | { type: 'audit.ledger_persisted' }
+  // ■■ v2.6.0 — quality ratchet (OpenDesign pattern) ■■
+  | { type: 'ratchet.rejected'; round: number; reason: string }
+  | { type: 'ratchet.accepted'; round: number; reason: string }
+  // ■■ v2.6.0 — model escalation (Codex --model fallback pattern) ■■
+  | { type: 'model.fallback'; from: string; to: string; position: number }
+  | { type: 'model.exhausted'; models: string[] }
+  // ■■ v2.6.0 — memory hygiene (Kilo decision-conflict pattern) ■■
+  | { type: 'memory.conflict_detected'; domain: string; key: string; sourceAgent: string }
+  | { type: 'memory.ltm_synced'; synced: number; skipped: number; errors: number }
+  // ■■ v2.6.0 — milestone acceptance verification ■■
+  | { type: 'milestone.verified'; key: string; passed: boolean; criteria_pass: number; criteria_fail: number }
+  | { type: 'milestone.critique'; key: string; critique: string }
 
 /** Human-readable verdict strings emitted by the agentic verdict engine. */
 export type AgenticVerdict = 'ship' | 'repair' | 'fail';

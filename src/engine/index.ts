@@ -16,6 +16,17 @@ import {
   loadMeta
 } from './checkpoint';
 import { sessionIdStorage } from './agentMemory';
+import {
+  openLedger,
+  startStage,
+  closeStage,
+  markAborted,
+  ledgerSummary,
+  persistLedger,
+  loadLedger,
+  type RunAuditLedger,
+} from './runAuditLedger';
+import { syncSessionDecisionsToLongTermMemory } from './memorySync';
 
 // ── Atomic Memory Bank ─────────────────────────────────────────────────────────
 // Writes a session summary to .atomic/memory/session-<id>.md after every
@@ -148,7 +159,33 @@ export async function generateBlueprint(
           }
           if (steers.length > 0) await markSteerApplied(sessionId, steers.map(s => s.id));
           emit({ type: 'milestone.started', key: m.key } as EngineEvent);
-          m.status = 'passed';
+          // v2.6.0 — milestone acceptance verification (Codex stop-and-fix
+          // pattern): a milestone only passes when its acceptance criteria are
+          // verified against the actual session output, not assumed.
+          const { verifyMilestonesAgainstContent, milestoneCritique } = await import('./milestoneVerifier');
+          const { loadCheckpoint } = await import('./checkpoint');
+          let accepted = true;
+          const content = (await loadCheckpoint<string>(sessionId, 'plan_output').catch(() => null)) ?? '';
+          if (m.acceptanceCriteria.length > 0 && content) {
+            const check = verifyMilestonesAgainstContent(
+              [{ key: m.key, title: m.objective, acceptanceCriteria: m.acceptanceCriteria }],
+              content,
+            );
+            for (const c of check) {
+              emit({
+                type: 'milestone.verified',
+                key: c.key,
+                passed: c.allPassed,
+                criteria_pass: c.criteria.filter(x => x.verdict === 'pass').length,
+                criteria_fail: c.criteria.filter(x => x.verdict === 'fail').length,
+              } as EngineEvent);
+              if (!c.allPassed) accepted = false;
+            }
+            if (!accepted) {
+              emit({ type: 'milestone.critique', key: m.key, critique: milestoneCritique(check) });
+            }
+          }
+          m.status = accepted ? 'passed' : 'failed';
           emit({ type: 'milestone.passed', key: m.key } as EngineEvent);
         }
       } else {
@@ -177,6 +214,18 @@ export async function generateBlueprint(
     });
 
     emit({ type: 'session_start', sessionId, mode });
+
+    // ── v2.6.0 — Run audit ledger (Codex durable run-memory pattern) ─────────
+    // Open the ledger at pipeline start; every stage closes it with verdict +
+    // tokens. Persisted to checkpoints so resume/rerun re-reads it. The ledger
+    // is also injected into the synthesizer prompt so downstream synthesis is
+    // aware of what actually happened in the run.
+    let ledger: RunAuditLedger | null = null;
+    try {
+      ledger = (await loadLedger(sessionId)) ?? openLedger(sessionId);
+    } catch {
+      ledger = openLedger(sessionId);
+    }
 
     // ── Pre-run budget cap enforcement ───────────────────────────────────────
     if (!existingSessionId) {
@@ -210,6 +259,7 @@ export async function generateBlueprint(
     if (mode === 'safe') {
       const { generateBlueprintSafe } = await import('./safeMode');
       await generateBlueprintSafe(prompt, config, sessionId, emit, signal);
+      if (ledger) await persistLedger(sessionId, ledger).catch(() => null);
       return;
     }
 
@@ -219,16 +269,28 @@ export async function generateBlueprint(
     // 1. Governor (check checkpoint first)
     let intent: GovernorIntent;
     let governorTokens = 0;
+    const governorStage = ledger ? startStage(ledger, 'governor', 'governor') : null;
     if (await checkpointExists(sessionId, 'intent')) {
       intent = (await loadCheckpoint<GovernorIntent>(sessionId, 'intent'))!;
       emit({ type: 'governor_start', prompt });
       emit({ type: 'governor_done', intent });
       // governorTokens stays 0 — already counted in the run that created the checkpoint
+      if (ledger && governorStage) closeStage(ledger, governorStage, 'success', 0, []);
     } else {
-      ({ intent, tokens_used: governorTokens } = await runGovernor(prompt, config, emit, signal));
-      await saveCheckpoint(sessionId, 'intent', intent);
-      emit({ type: 'checkpoint_saved', key: 'intent' });
+      try {
+        ({ intent, tokens_used: governorTokens } = await runGovernor(prompt, config, emit, signal));
+        await saveCheckpoint(sessionId, 'intent', intent);
+        emit({ type: 'checkpoint_saved', key: 'intent' });
+        if (ledger && governorStage) closeStage(ledger, governorStage, 'success', governorTokens, []);
+      } catch (err: unknown) {
+        if (ledger && governorStage) closeStage(ledger, governorStage, 'failed', 0, [(err as Error).message]);
+        throw err;
+      }
     }
+    // v2.6.0 — memory hygiene: pin the session domain so cross-session
+    // decisions are retrievable by domain and sync long-term memory at the
+    // end of the run.
+    if (ledger) emit({ type: 'audit.stage_end', stage: 'governor', label: 'governor', verdict: 'success', tokens_used: governorTokens });
 
     if (signal?.aborted) return;
     // 2. Pillars (parallel, each checks its own checkpoint)
@@ -250,7 +312,8 @@ export async function generateBlueprint(
       planningResult = await runPillar(
         'planning', config,
         planningDef.govSysPrompt, planningDef.prosSysPrompt,
-        planningDef.staticGovPrompt, planningDef.agents, intent, emit, signal
+        planningDef.staticGovPrompt, planningDef.agents, intent, emit, signal,
+        undefined, undefined, undefined, ledger ?? undefined,
       );
       if (signal?.aborted) return;
       await saveCheckpoint(sessionId, planningCkKey, planningResult);
@@ -275,7 +338,8 @@ export async function generateBlueprint(
         emit({ type: 'pillar_prosecuted', pillar: name });
         return cached;
       }
-      const result = await runPillar(name, config, govSysPrompt, prosSysPrompt, staticGovPrompt, agents, intent, emit, signal, planningContext);
+      const result = await runPillar(name, config, govSysPrompt, prosSysPrompt, staticGovPrompt, agents, intent, emit, signal, planningContext,
+        undefined, undefined, ledger ?? undefined);
       if (signal?.aborted) return undefined;
       await saveCheckpoint(sessionId, ckKey, result);
       emit({ type: 'checkpoint_saved', key: ckKey });
@@ -283,21 +347,33 @@ export async function generateBlueprint(
     });
 
     const pillarResults = [planningResult, ...(await Promise.all(pillarPromises))];
-    if (signal?.aborted) throw new DOMException('Generation cancelled', 'AbortError');
+    if (signal?.aborted) {
+      if (ledger) markAborted(ledger);
+      await persistLedger(sessionId, ledger).catch(() => null);
+      throw new DOMException('Generation cancelled', 'AbortError');
+    }
     const pillars: PillarOutputMap = {};
     pillarResults.forEach(p => { if (p) pillars[p.pillar as PillarName] = p; });
 
     // 3. Prosecutor
     let prosecutor: ProsecutorResult;
+    const prosecutorStage = ledger ? startStage(ledger, 'prosecutor', 'prosecutor') : null;
     if (await checkpointExists(sessionId, 'prosecutor')) {
       prosecutor = (await loadCheckpoint<ProsecutorResult>(sessionId, 'prosecutor'))!;
       emit({ type: 'prosecutor_start' });
       emit({ type: 'prosecutor_done', gaps_found: prosecutor.gaps_found ?? 0, gaps: (prosecutor.gaps ?? []).map((g: any) => g.description) });
+      if (ledger && prosecutorStage) closeStage(ledger, prosecutorStage, 'success', 0, []);
     } else {
-      prosecutor = await runProsecutor(pillars, config, emit, signal);
-      if (signal?.aborted) throw new DOMException('Generation cancelled', 'AbortError');
-      await saveCheckpoint(sessionId, 'prosecutor', prosecutor);
-      emit({ type: 'checkpoint_saved', key: 'prosecutor' });
+      try {
+        prosecutor = await runProsecutor(pillars, config, emit, signal);
+        if (signal?.aborted) throw new DOMException('Generation cancelled', 'AbortError');
+        await saveCheckpoint(sessionId, 'prosecutor', prosecutor);
+        emit({ type: 'checkpoint_saved', key: 'prosecutor' });
+        if (ledger && prosecutorStage) closeStage(ledger, prosecutorStage, 'success', prosecutor.tokens_used ?? 0, []);
+      } catch (err: unknown) {
+        if (ledger && prosecutorStage) closeStage(ledger, prosecutorStage, 'failed', 0, [(err as Error).message]);
+        throw err;
+      }
     }
 
     // 4. Targeted re-run if Prosecutor finds gaps
@@ -306,8 +382,23 @@ export async function generateBlueprint(
       ...d,
       prior: d.name === 'planning' ? undefined : planningContext
     }));
-    prosecutor = await runRerunLoop(pillars, rerunDefs, prosecutor, config, intent, emit, signal, sessionId);
-    if (signal?.aborted) return;
+    const rerunStage = ledger ? startStage(ledger, 'rerun', 'rerun') : null;
+    try {
+      prosecutor = await runRerunLoop(pillars, rerunDefs, prosecutor, config, intent, emit, signal, sessionId);
+      if (ledger && rerunStage) closeStage(ledger, rerunStage, 'success', 0, []);
+    } catch (err: unknown) {
+      if (ledger && rerunStage) closeStage(ledger, rerunStage, 'failed', 0, [(err as Error).message]);
+      throw err;
+    }
+    if (signal?.aborted) {
+      if (ledger) markAborted(ledger);
+      await persistLedger(sessionId, ledger);
+      return;
+    }
+    if (ledger) {
+      await persistLedger(sessionId, ledger).catch(() => null);
+      emit({ type: 'audit.ledger_persisted' });
+    }
 
     // 3.5. Agentic Core stage snapshot (Kilo Code pattern) — capture the
     //      pre-verifier state so the run can be rolled back to the prosecuted
@@ -324,8 +415,11 @@ export async function generateBlueprint(
       engineLog.warn({ err }, '[snapshot] pre-verifier capture failed — non-fatal');
     }
 
-    // 5. Synthesizer
-    const blueprint = await runSynthesizer(prompt, config, intent, pillars, prosecutor, emit, signal);
+    // 5. Synthesizer — inject the run audit ledger so synthesis is grounded in
+    // the actual run trajectory (Codex documentation.md pattern).
+    const verifierStage = ledger ? startStage(ledger, 'verifier', 'verifier') : null;
+    const synthesizerStage = ledger ? startStage(ledger, 'synthesizer', 'synthesizer') : null;
+    const blueprint = await runSynthesizer(prompt, config, intent, pillars, prosecutor, emit, signal, sessionId);
     if (signal?.aborted) return;
     blueprint.generation_time_ms = Date.now() - startTime;
     blueprint.total_tokens += governorTokens;
@@ -352,6 +446,10 @@ export async function generateBlueprint(
       verified.generation_time_ms = blueprint.generation_time_ms;
       verified.session_id = sessionId;
       Object.assign(blueprint, verified);
+      if (ledger && verifierStage) {
+        const verifierTokens = verifierResult.outcome?.tokens_used ?? 0;
+        closeStage(ledger, verifierStage, verifierResult.outcome?.verdict === 'ship' ? 'success' : 'partial', verifierTokens, []);
+      }
       // Persist the verdict round-record on the session for inspection.
       try {
         await saveCheckpoint(sessionId, 'verdict', verifierResult.outcome);
@@ -381,6 +479,37 @@ export async function generateBlueprint(
       }
     } catch (err: unknown) {
       engineLog.error({ err }, '[verifier] verifier loop failed — shipping pre-verifier blueprint');
+      if (ledger && verifierStage) closeStage(ledger, verifierStage, 'failed', 0, [(err as Error).message]);
+    }
+
+    // Close the synthesizer stage on the final token count and persist the
+    // ledger before the run record is closed.
+    if (ledger && synthesizerStage) {
+      closeStage(ledger, synthesizerStage, 'success', blueprint.total_tokens ?? 0, []);
+    }
+    if (ledger) {
+      const summary = ledgerSummary(ledger);
+      engineLog.info(
+        { summary },
+        '[ledger] run audit ledger — stages completed',
+      );
+      await persistLedger(sessionId, ledger).catch(() => null);
+      emit({ type: 'audit.ledger_persisted' });
+    }
+
+    // v2.6.0 — memory hygiene: sync this session's structured decisions to the
+    // long-term store so future sessions in the same domain benefit from them
+    // (Kilo decision-conflict + cross-session accumulation pattern).
+    try {
+      const syncReport = syncSessionDecisionsToLongTermMemory(sessionId);
+      emit({
+        type: 'memory.ltm_synced',
+        synced: syncReport.synced,
+        skipped: syncReport.skipped,
+        errors: syncReport.errors,
+      });
+    } catch (err: unknown) {
+      engineLog.warn({ err }, '[memory] long-term memory sync failed — non-fatal');
     }
 
     await saveCheckpoint(sessionId, 'blueprint', blueprint);

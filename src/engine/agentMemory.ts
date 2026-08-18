@@ -26,6 +26,7 @@
 
 import { AsyncLocalStorage } from 'async_hooks';
 import { log } from './logger';
+import { publishEvent } from './eventBus';
 
 // ── Session ID propagation ────────────────────────────────────────────────────
 // Set this in generateBlueprint so all agent tool calls can read the sessionId.
@@ -38,6 +39,31 @@ const MAX_SESSIONS = 200;
 
 /** Maximum number of decision entries per session. Prevents runaway agents. */
 const MAX_DECISIONS_PER_SESSION = 500;
+
+// ── Decision hygiene types (v2.6.0) — decision-conflict detection ─────────────
+
+export interface AgentDecision {
+  domain:       string;
+  key:          string;
+  value:        string;
+  sourceAgent:  string;
+  importance:   'low' | 'medium' | 'high' | 'critical';
+  ts:           number;
+}
+
+export interface DecisionConflict {
+  domain:       string;
+  key:          string;
+  existing:     string;
+  incoming:     string;
+  sourceAgent:  string;
+}
+
+/** Per-session decision memory with conflict history. */
+export interface DecisionMemory {
+  decisions: AgentDecision[];
+  conflicts: DecisionConflict[];
+}
 
 // ── Memory entry ──────────────────────────────────────────────────────────────
 
@@ -65,7 +91,80 @@ class AgentMemoryStore {
   private decisions = new Map<string, MemoryEntry[]>();
   private concerns  = new Map<string, ConcernEntry[]>();
 
+  // v2.6.0 decision hygiene — structured decisions + conflict history per session
+  private structuredDecisions = new Map<string, DecisionMemory>();
+  private domainBySession     = new Map<string, string>();
+
   // ── Decisions ─────────────────────────────────────────────────────────────
+
+  /**
+   * v2.6.0 — record a structured decision with conflict hygiene. On conflict
+   * (same domain+key, different normalized value) the existing decision is
+   * preserved under a suffixed key, a conflict is emitted via the event bus
+   * (readDecisions / readStructuredDecisions expose it), and the incoming
+   * value becomes the new active decision.
+   */
+  recordStructuredDecision(sessionId: string, decision: AgentDecision): void {
+    this.evictIfNeeded();
+    let mem = this.structuredDecisions.get(sessionId);
+    if (!mem) {
+      mem = { decisions: [], conflicts: [] };
+      this.structuredDecisions.set(sessionId, mem);
+    }
+    const norm = `${decision.domain}:${decision.key}`;
+    const existingIdx = mem.decisions.findIndex(
+      d => `${d.domain}:${d.key}` === norm,
+    );
+    const normalizedNew = normalizeDecisionValue(decision.value);
+    const normalizedExisting =
+      existingIdx >= 0 ? normalizeDecisionValue(mem.decisions[existingIdx]!.value) : null;
+
+    if (existingIdx >= 0 && normalizedExisting !== normalizedNew) {
+      // Preserve history under a suffixed key; register the conflict.
+      mem.decisions[existingIdx]!.key = `${mem.decisions[existingIdx]!.key}@conflict:${mem.conflicts.length + 1}`;
+      mem.conflicts.push({
+        domain:       decision.domain,
+        key:          decision.key,
+        existing:     mem.decisions[existingIdx]!.value,
+        incoming:     decision.value,
+        sourceAgent:  decision.sourceAgent,
+      });
+      publishEvent('memory.conflict_detected', sessionId, sessionId, {
+        domain: decision.domain,
+        key: decision.key,
+        sourceAgent: decision.sourceAgent,
+      });
+      log.warn(
+        { sessionId, domain: decision.domain, key: decision.key, sourceAgent: decision.sourceAgent },
+        '[memory] decision conflict detected — previous value preserved under suffixed key',
+      );
+    }
+
+    if (existingIdx >= 0) {
+      mem.decisions[existingIdx] = decision;
+    } else {
+      mem.decisions.push(decision);
+    }
+  }
+
+  /** Read structured decisions (all or by domain). */
+  readStructuredDecisions(sessionId: string, domain?: string): DecisionMemory {
+    const mem = this.structuredDecisions.get(sessionId) ?? { decisions: [], conflicts: [] };
+    if (!domain) return mem;
+    return {
+      decisions: mem.decisions.filter(d => d.domain === domain),
+      conflicts: mem.conflicts.filter(c => c.domain === domain),
+    };
+  }
+
+  /** Tag a session with a domain for long-term memory sync at run end. */
+  setSessionDomain(sessionId: string, domain: string): void {
+    this.domainBySession.set(sessionId, domain);
+  }
+
+  getSessionDomain(sessionId: string): string | undefined {
+    return this.domainBySession.get(sessionId);
+  }
 
   writeDecision(
     sessionId: string,
@@ -135,7 +234,9 @@ class AgentMemoryStore {
   cleanup(sessionId: string): void {
     const hadDecisions = this.decisions.delete(sessionId);
     const hadConcerns  = this.concerns.delete(sessionId);
-    if (hadDecisions || hadConcerns) {
+    const hadStructured = this.structuredDecisions.delete(sessionId);
+    this.domainBySession.delete(sessionId);
+    if (hadDecisions || hadConcerns || hadStructured) {
       log.debug({ sessionId }, '[memory] session cleaned up');
     }
   }
@@ -158,6 +259,15 @@ class AgentMemoryStore {
       );
     }
   }
+}
+
+/** Normalize a decision value for conflict comparison — whitespace/case collapsed. */
+export function normalizeDecisionValue(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s]/g, '')
+    .trim();
 }
 
 function affectsPillar(e: ConcernEntry, pillar: string): boolean {

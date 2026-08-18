@@ -26,6 +26,11 @@ import {
   type VerifierOutcome,
   type VerifierRound,
 } from './agenticCore';
+import {
+  evaluateRatchet,
+  makeRatchetEntry,
+  type RatchetEntry,
+} from './qualityRatchet';
 import { log } from './logger';
 import type { EngineEvent, ModelConfig } from './types';
 import type { ZodType } from 'zod';
@@ -107,14 +112,42 @@ export async function verifyPipelineOutput<T>(
     emit: emit ? (emit as (event: { type: string; [k: string]: unknown }) => void) : null,
     signal,
     async review(_round, c, _sig) {
-      const { roles, mustFix } = evaluateChecks(c, checks);
+      const { roles, mustFix, passed } = evaluateChecks(c, checks);
+      (c as T & { __lastPassed?: boolean[] }).__lastPassed = passed;
       return { scores: roles, mustFix, tokens_used: 0 };
     },
-    async repair(_round, _c, priorRound: VerifierRound, sig) {
-      const failedLabels = checks
-        .filter(ch => ch.role === 'completeness')
-        .map(ch => ch.label);
-      const critique = `Failed checks: ${failedLabels.length ? failedLabels.join(', ') : 'composite below threshold'}`;
+    async repair(_round, c, priorRound: VerifierRound, sig) {
+      // v2.6.0 — quality ratchet (OpenDesign high-water-mark pattern): track
+      // rounds across repairs; the verifier verdict engine already elects
+      // best-ever candidates, so we additionally publish ratchet events and
+      // target the repair prompt at the ACTUAL failed checks rather than a
+      // generic placeholder critique.
+      const priorCandidate = c as T & { __ratchetHistory?: RatchetEntry[]; __lastPassed?: boolean[] };
+      const ratchetHistory: RatchetEntry[] = priorCandidate.__ratchetHistory ?? [];
+      const passed: boolean[] = priorCandidate.__lastPassed ?? [];
+      const candidateEntry = makeRatchetEntry(
+        priorRound.n,
+        priorRound.scores.reduce((s, r) => s + r.score, 0),
+        passed,
+        0,
+      );
+      const decision = evaluateRatchet(ratchetHistory, candidateEntry);
+      if (!decision.accept) {
+        emit?.({ type: 'ratchet.rejected', round: priorRound.n, reason: decision.reason } as unknown as EngineEvent);
+      } else {
+        emit?.({ type: 'ratchet.accepted', round: priorRound.n, reason: decision.reason } as unknown as EngineEvent);
+      }
+      const next = (data: T): T & { __ratchetHistory: RatchetEntry[]; __lastPassed: boolean[] } =>
+        Object.assign(Object.create(null) as Record<string, never>, data as object, {
+          __ratchetHistory: [...ratchetHistory, candidateEntry],
+          __lastPassed: checks.map(ch => ch.pass(data)),
+        }) as T & { __ratchetHistory: RatchetEntry[]; __lastPassed: boolean[] };
+      const failedChecks = checks
+        .filter(ch => !ch.pass(c))
+        .map(ch => `${ch.label} (${ch.role})`);
+      const critique = failedChecks.length
+        ? `Failed checks (rewrite these specifically — generic outputs that still fail these checks will be rejected): ${failedChecks.join('; ')}`
+        : 'Composite below threshold';
       const { data, tokens_used } = await generateJson<T>(
         `${synthesisPrompt}\n\n${critique}`,
         config,
@@ -124,9 +157,9 @@ export async function verifyPipelineOutput<T>(
       );
       if (sig?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (emit) {
-        emit({ type: 'reviewer_repair', pillar: 'quality', agents_repaired: failedLabels.slice(0, 5) } as unknown as EngineEvent);
+        emit({ type: 'reviewer_repair', pillar: 'quality', agents_repaired: failedChecks.slice(0, 5) } as unknown as EngineEvent);
       }
-      return { candidate: data, tokens_used };
+      return { candidate: next(data), tokens_used };
     },
   });
 

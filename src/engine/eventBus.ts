@@ -98,7 +98,14 @@ export type AtomicEventType =
   | 'project.switched'
   | 'skills.custom_registered'
   | 'skills.custom_updated'
-  | 'skills.custom_deleted';
+  | 'skills.custom_deleted'
+  // v2.6.0 — run audit ledger + agent budget + memory hygiene events
+  | 'audit.stage_start'
+  | 'audit.stage_end'
+  | 'audit.ledger_persisted'
+  | 'budget.warning'
+  | 'budget.exceeded'
+  | 'memory.conflict_detected';
 
 // ── Core event shape ───────────────────────────────────────────────────────────
 

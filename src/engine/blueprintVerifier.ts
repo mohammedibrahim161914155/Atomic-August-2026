@@ -20,6 +20,12 @@ import type { ModelConfig } from './config';
 import { scoreBlueprint } from './qualityScorer';
 import { VALIDATION_GATES } from './validationGates';
 import {
+  evaluateRatchet,
+  makeRatchetEntry,
+  bestRatchetEntry,
+  type RatchetEntry,
+} from './qualityRatchet';
+import {
   runVerifier,
   roleScore,
   type VerdictConfig,
@@ -104,6 +110,7 @@ export async function verifyBlueprint(
       async review(_round, candidate, _sig) {
         // 1. Structural gate (placeholder detection etc.)
         const gateResult = VALIDATION_GATES.blueprint.validate(candidate, candidate.session_id);
+        (candidate as Blueprint & { __gateQualityFlags?: typeof gateResult.qualityFlags }).__gateQualityFlags = gateResult.qualityFlags;
         // 2. Quality composite — scoreBlueprint drives completeness; the gate
         //    penalty and prosecutor gaps surface as mustFix blockers.
         const { score, breakdown } = scoreBlueprint(candidate.sections, pillars, prosecutor);
@@ -119,21 +126,45 @@ export async function verifyBlueprint(
         return { scores: roles, mustFix, tokens_used: 0 };
       },
       async repair(_round, candidate, priorRound, sig) {
-        // Build a targeted repair prompt citing the weakest sections.
-        const reasons =
-          priorRound.mustFix > 0
-            ? [
-                'Placeholder or TBD content detected in required sections',
-                'Unresolved prosecutor gaps',
-                'Empty or self-referencing sections',
-              ]
-            : ['Composite score below threshold'];
+        // v2.6.0 — quality ratchet (OpenDesign high-water-mark pattern): the
+        // repair only ships if it improves on the best round so far; never
+        // regress, even if the model drifts.
+        const priorCandidate = candidate as Blueprint & { __ratchetHistory?: RatchetEntry[]; __gateQualityFlags?: Array<{ severity: string; flag: string; message: string }> };
+        const ratchetHistory: RatchetEntry[] = priorCandidate.__ratchetHistory ?? [];
+        const gateFlags = priorCandidate.__gateQualityFlags ?? [];
+        const candidateEntry = makeRatchetEntry(
+          priorRound.n,
+          priorRound.scores.reduce((s, r) => s + r.score, 0),
+          [gateFlags.every(f => f.severity !== 'critical')],
+          0,
+        );
+        const ratchetDecision = evaluateRatchet(ratchetHistory, candidateEntry);
+        if (!ratchetDecision.accept) {
+          emit({ type: 'ratchet.rejected', round: priorRound.n, reason: ratchetDecision.reason });
+        } else if (ratchetDecision.accept) {
+          emit({ type: 'ratchet.accepted', round: priorRound.n, reason: ratchetDecision.reason });
+        }
+        void bestRatchetEntry([...ratchetHistory, candidateEntry]);
+
+        // v2.6.0 — real blocker descriptions instead of generic placeholders:
+        // cite the actual critical quality flags and unresolved prosecutor
+        // gaps so the repair prompt targets the concrete failure.
+        const realReasons: string[] = [];
+        for (const flag of gateFlags.filter(f => f.severity === 'critical')) {
+          realReasons.push(`[${flag.flag}] ${flag.message}`);
+        }
+        if (prosecutor.verdict === 'requires_revision' && prosecutor.gaps?.length) {
+          for (const gap of prosecutor.gaps.filter(g => g.severity === 'critical' || g.severity === 'high').slice(0, 5)) {
+            realReasons.push(`[prosecutor-gap:${gap.id}] ${gap.description}`);
+          }
+        }
+        const reasons = realReasons.length > 0 ? realReasons : ['Composite score below threshold'];
         const weak = weakSectionKeys(candidate.sections, reasons);
         const cited = (weak as Array<keyof BlueprintSections>)
           .map(k => `- ${k}: ${(candidate.sections[k] ?? '').slice(0, 200).replace(/\n/g, ' ')}`)
           .join('\n');
         const system = `${VERIFIER_SYSTEM}\n\nCurrent weak sections:\n${cited}`;
-        const ctx = `Must-fix reasons:\n${reasons.join('\n')}\n\nCurrent sections JSON:\n${JSON.stringify(candidate.sections, null, 1).slice(0, 30_000)}`;
+        const ctx = `Must-fix reasons (cite these concretely when rewriting — generic repair attempts are rejected):\n${reasons.join('\n')}\n\nCurrent sections JSON:\n${JSON.stringify(candidate.sections, null, 1).slice(0, 30_000)}`;
         const { data: sections, tokens_used } = await generateJson<BlueprintSections>(
           ctx,
           config,
@@ -146,6 +177,8 @@ export async function verifyBlueprint(
         const { score, breakdown } = scoreBlueprint(sections, pillars, prosecutor);
         repaired.quality_score = score;
         repaired.quality_breakdown = breakdown;
+        // Carry ratchet history + best-entry gating into the next round.
+        (repaired as Blueprint & { __ratchetHistory?: RatchetEntry[] }).__ratchetHistory = [...ratchetHistory, candidateEntry];
         emit({ type: 'reviewer_repair', pillar: 'quality', agents_repaired: weak } as unknown as EngineEvent);
         return { candidate: repaired, tokens_used };
       },

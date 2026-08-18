@@ -2,6 +2,19 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.6.0] — August 2026
+
+### System & Harness SOTA Upgrade (src/engine/) — Codex / Kimi CLI / OpenCode / OpenDesign
+- **Run audit ledger** (`runAuditLedger.ts`): Codex `Documentation.md` pattern — every pipeline stage (governor, pillars, prosecutor, rerun, verifier, synthesizer) is recorded with verdict, tokens, duration, and notes; persisted to the checkpoint store and injected into the synthesizer prompt so output is grounded in the actual run trajectory
+- **Deterministic prompt assembly** (`promptParts.ts`): every agent prompt is built in a canonical layer order (system → constraints → context → working memory → long-term memory → clarifications → audit ledger → task); layers are replaced, never duplicated — removes the prompt-order nondeterminism that invalidates provider-side prompt caching
+- **Quality-delta ratchet** (`qualityRatchet.ts`): OpenDesign high-water-mark rule wired into both `blueprintVerifier.ts` and `pipelineVerifier.ts` — a repaired candidate must improve score or blocker count, otherwise it is rejected and the best prior round is carried forward; repairs can never regress quality
+- **Real-blocker repair prompts**: the verifier repair loop now cites actual validation-gate critical flags and unresolved high/critical prosecutor gaps instead of generic must-fix strings
+- **Plan-mode milestone acceptance verification** (`milestoneVerifier.ts`): milestones are verified against their `acceptanceCriteria` (must-include, cardinality, must-not, open-question) instead of being marked passed unconditionally; `milestone.verified` / `milestone.critique` events emitted
+- **Per-agent budgets & model escalation** (`agentBudget.ts`, wired into `agentRunner.ts`): per-step token budgets with 80% warning and hard cap (`budget.warning` / `budget.exceeded`), tool-permission scopes (`AgentScope`), and a Codex-style model-fallback escalation chain on provider failure (`model.fallback` / `model.exhausted` events)
+- **Memory decision hygiene** (`memorySync.ts`, `agentMemory.ts`): `recordStructuredDecision` detects conflicting decisions across pillars on the same key (`memory.conflict_detected` events) and syncs session decisions to long-term memory at run end (`memory.ltm_synced`)
+- **Telemetry**: new `audit.stage_start` / `audit.stage_end` events with verdict + tokens; ledger summary logged on run close
+- +35 tests for the new pure modules — 469 passing total
+
 ## [2.5.0] — August 2026
 
 ### SDK — Production-Grade Typed Client (src/sdk/)

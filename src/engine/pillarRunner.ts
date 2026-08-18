@@ -1,6 +1,8 @@
 import { generateJson } from './openrouter';
 import { runAgentWithTools } from './agentRunner';
 import { withRetry } from './withRetry';
+import { startStage, closeStage, type RunAuditLedger } from './runAuditLedger';
+import { createPromptParts, addLayer, getPromptParts } from './promptParts';
 import { PillarName, PillarOutput, AgentOutput, GovernorIntent, EngineEvent, ModelConfig, PillarProsecutorReport, PillarProsecutorReportSchema, PillarBrief, PillarBriefSchema, PillarSummary } from './types';
 import { EFFORT_TOKEN_BUDGETS } from './config';
 import { runPerPillarSynthesizer } from './perPillarSynthesizer';
@@ -64,7 +66,13 @@ async function runPillarGovernor(
   config: ModelConfig,
   systemPrompt: string
 ): Promise<PillarBrief> {
-  const prompt = `GovernorIntent:\n${JSON.stringify(intent, null, 2)}\n\nProduce the ${pillarName} pillar brief now.`;
+  // v2.6.0 — deterministic prompt-layer ordering (Codex cache lesson):
+  // pillar briefs are assembled through the canonical prompt-parts builder.
+  const briefParts = createPromptParts();
+  addLayer(briefParts, 'system', PILLAR_GOVERNOR_SYSTEM_PROMPT.replace(/\{pillarName\}/g, pillarName));
+  addLayer(briefParts, 'context', `GovernorIntent:\n${JSON.stringify(intent, null, 2)}`);
+  addLayer(briefParts, 'task', `Produce the ${pillarName} pillar brief now.`);
+  const prompt = getPromptParts(briefParts);
   
   const { data } = await withRetry(
     () => generateJson<PillarBrief>(
@@ -90,8 +98,13 @@ export async function runPillar(
   signal?: AbortSignal,
   priorContext?: string,
   implicatedAgents?: string[],
-  existingOutputs?: AgentOutput[]
+  existingOutputs?: AgentOutput[],
+  ledger?: RunAuditLedger,
 ): Promise<PillarOutput> {
+  // v2.6.0 — ledger stage bookkeeping (Codex audit-ledger pattern); the stage
+  // is closed at the end of the function with its verdict and token usage.
+  const stageEntry = ledger ? startStage(ledger, 'pillar', `pillar:${pillarName}`) : null;
+
   emit({ type: 'pillar_start', pillar: pillarName, agents: agents.map(a => a.name) });
   
   let pillarBrief: string | PillarBrief = staticGovPrompt;
@@ -275,7 +288,7 @@ export async function runPillar(
     master_record_md: prosecutorReport ? JSON.stringify(prosecutorReport, null, 2) : agentOutputs.map(a => `=== ${a.agent} ===\n${a.content.substring(0, 5000)}`).join('\n\n')
   };
 
-  return {
+  const output: PillarOutput = {
     pillar: pillarName,
     agents: agentOutputs,
     failed_agents: failedAgents,
@@ -289,4 +302,18 @@ export async function runPillar(
     tokens_synthesizer: tokensSynthesizer,
     tokens_total: agentTokens + tokensReviewer + tokensProsecutor + tokensSynthesizer
   };
+
+  // Close the ledger stage with a verdict derived from failure/degradation.
+  if (stageEntry && ledger) {
+    const verdict = signal?.aborted
+      ? 'aborted'
+      : failedAgents.length === agents.length
+        ? 'failed'
+        : failedAgents.length > 0 || (issuesCount === 0 && prosecutorReport === undefined)
+          ? 'partial'
+          : 'success';
+    closeStage(ledger, stageEntry, verdict, output.tokens_total, []);
+  }
+
+  return output;
 }

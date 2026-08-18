@@ -31,6 +31,32 @@ vi.mock('./openrouter');
 
 vi.mock('./safeMode', () => ({ generateBlueprintSafe: vi.fn() }));
 
+// v2.6.0 — the ledger modules are now part of the hot orchestration path;
+// mock them to keep these orchestrator-level tests deterministic.
+vi.mock('./runAuditLedger', () => ({
+  openLedger: vi.fn().mockReturnValue({ sessionId: '', stages: [], totalTokensUsed: 0, aborted: false, startedAt: '', lastUpdatedAt: '' }),
+  startStage: vi.fn().mockReturnValue({ index: 0, errors: [], notes: [] }),
+  closeStage: vi.fn(),
+  markAborted: vi.fn(),
+  renderAuditBlock: vi.fn().mockReturnValue('audit block'),
+  ledgerSummary: vi.fn().mockReturnValue({ stageCount: 0 }),
+  persistLedger: vi.fn().mockResolvedValue(undefined),
+  loadLedger: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock('./memorySync', () => ({
+  syncSessionDecisionsToLongTermMemory: vi.fn().mockReturnValue({ synced: 0, skipped: 0, errors: 0 }),
+}));
+
+// The verifier loop now needs checkpointed verdicts + rerun outputs; mock it
+// so orchestrator tests stay focused on stage flow rather than repair logic.
+vi.mock('./blueprintVerifier', () => ({
+  verifyBlueprint: vi.fn().mockImplementation(async ({ blueprint }: any) => ({
+    outcome: { verdict: 'ship', rounds: [], tokens_used: 0, final: blueprint },
+    blueprint,
+  })),
+}));
+
 describe('Index generated', () => {
   afterEach(() => {
     vi.clearAllMocks();

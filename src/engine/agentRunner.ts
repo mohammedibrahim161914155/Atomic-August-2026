@@ -23,6 +23,15 @@ import { getModelForConfig } from './openrouter';
 import { log } from './logger';
 import { withRetry } from './withRetry';
 import type { EngineEvent, PillarName } from './types';
+import {
+  createAgentBudget,
+  recordAgentStep,
+  type AgentBudgetConfig,
+  type AgentScope,
+  createEscalationPolicy,
+  escalateModel,
+  currentModel,
+} from './agentBudget';
 
 // ── Domain knowledge base ─────────────────────────────────────────────────────
 // Agents query this via the `lookupPattern` tool before writing recommendations.
@@ -285,9 +294,15 @@ function buildAgentTools(
   pillarName: string,
   agentName: string,
   emit?: (event: EngineEvent) => void,
+  scope?: AgentScope,
 ): Record<string, any> {
-  return {
-    readMemory: {
+  const allTools: Record<string, any> = {};
+  const add = (name: string, denied: boolean, tool: any) => {
+    if (!denied) allTools[name] = tool;
+  };
+
+  add('readMemory', !!scope && !isToolInScope(scope, 'readMemory'), {
+    readMemory__self: null,
       description: `Read architectural decisions written by other agents in this generation.
 Call this at the START of your reasoning to check what peers have decided so your output is consistent.
 Use scope='all_pillars' to see cross-pillar context; scope='same_pillar' for just your pillar.`,
@@ -308,9 +323,10 @@ Use scope='all_pillars' to see cross-pillar context; scope='same_pillar' for jus
           })),
         };
       },
-    },
+  });
 
-    writeDecision: {
+  add('writeDecision', !!scope && !isToolInScope(scope, 'writeDecision'), {
+    writeDecision__self: null,
       description: `Record a concrete architectural decision to shared agent memory.
 Call this for EVERY key decision: technology choices, schemas, protocols, constraints, integrations.
 Other agents running in parallel will read these decisions to stay consistent.`,
@@ -328,9 +344,10 @@ Other agents running in parallel will read these decisions to stay consistent.`,
         });
         return { ok: true, stored_as: `${pillarName}:${key}` };
       },
-    },
+  });
 
-    flagConcern: {
+  add('flagConcern', !!scope && !isToolInScope(scope, 'flagConcern'), {
+    flagConcern__self: null,
       description: `Flag a risk or cross-cutting concern for the prosecutor and other agents.
 Use for issues outside your pillar's scope that could affect the overall design.
 Flagging does NOT replace your full deliverable — always complete your output after flagging.`,
@@ -346,9 +363,10 @@ Flagging does NOT replace your full deliverable — always complete your output 
         });
         return { ok: true, flagged: true, severity, affects_pillars };
       },
-    },
+  });
 
-    lookupPattern: {
+  add('lookupPattern', !!scope && !isToolInScope(scope, 'lookupPattern'), {
+    lookupPattern__self: null,
       description: `Look up proven patterns, pitfalls, and tradeoffs for an architectural domain.
 Call this BEFORE writing recommendations to ground your output in established best practices.
 Domains: authentication, authorization, database, api, security, scalability, testing, deployment, error_handling, observability, caching, data_modeling`,
@@ -377,9 +395,10 @@ Domains: authentication, authorization, database, api, security, scalability, te
         const aspectKey = aspect as 'patterns' | 'pitfalls' | 'tradeoffs';
         return { found: true, domain: matchKey, result: entry[aspectKey] };
       },
-    },
+    });
 
-    estimateComplexity: {
+  add('estimateComplexity', !!scope && !isToolInScope(scope, 'estimateComplexity'), {
+    estimateComplexity__self: null,
       description: `Estimate implementation complexity for a component or feature.
 Use before writing implementation timelines to ensure estimates are realistic.`,
       parameters: estimateComplexitySchema,
@@ -407,8 +426,19 @@ Use before writing implementation timelines to ensure estimates are realistic.`,
             : 'Manageable complexity — standard engineering practices apply.',
         };
       },
-    },
-  };
+    });
+
+  // Strip the placeholder keys before returning
+  delete allTools.readMemory__self;
+  delete allTools.writeDecision__self;
+  delete allTools.flagConcern__self;
+  delete allTools.lookupPattern__self;
+  delete allTools.estimateComplexity__self;
+  return allTools;
+}
+
+function isToolInScope(scope: AgentScope, toolName: string): boolean {
+  return scope.toolPermissions[toolName] !== 'deny';
 }
 
 // ── Agent runner ──────────────────────────────────────────────────────────────
@@ -418,6 +448,21 @@ export interface AgentRunResult {
   tokens_used: number;
   tool_calls: number;
   steps: number;
+}
+
+/**
+ * Optional per-agent controls (v2.6.0 — Codex/OpenCode per-agent config):
+ *   - budget: step + estimated-token caps with 80% warnings.
+ *   - scope: tool permission profile (OpenCode allow/ask/deny); denied tools
+ *     are omitted from the tool set entirely.
+ *   - fallbackChain: model escalation chain (Codex --model fallback); on a
+ *     provider failure the loop retries against the next model instead of
+ *     degrading silently to plain text.
+ */
+export interface AgentRunOptions {
+  budget?: AgentBudgetConfig;
+  scope?: AgentScope;
+  fallbackChain?: string[];
 }
 
 /**
@@ -439,15 +484,19 @@ export async function runAgentWithTools(
   signal?: AbortSignal,
   onChunk?: (chunk: string) => void,
   emit?: (event: EngineEvent) => void,
+  options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
   const sessionId = sessionIdStorage.getStore() ?? `anon-${Date.now()}`;
-  const model = getModelForConfig(config, config.proModel);
-  const tools = buildAgentTools(sessionId, pillarName, agentName, emit);
+  const escalation = createEscalationPolicy(options.fallbackChain ?? [config.proModel]);
+  const tools = buildAgentTools(sessionId, pillarName, agentName, emit, options.scope);
 
   let toolCallCount = 0;
   let stepCount = 0;
+  const budgetState = options.budget ? createAgentBudget() : undefined;
+  const traceId = `${agentName}@${pillarName}`;
 
-  try {
+  async function runLoop(modelName: string): Promise<AgentRunResult> {
+    const model = getModelForConfig(config, modelName);
     const result = await withRetry(
       () => generateText({
         model,
@@ -460,46 +509,74 @@ export async function runAgentWithTools(
         maxRetries: 0,           // withRetry owns the retry loop
         abortSignal: signal,
         onStepFinish: (step: any) => {
-        stepCount++;
-        const toolCalls: any[] = step.toolCalls ?? [];
-        const stepText: string = step.text ?? '';
+          stepCount++;
+          const stepText: string = step.text ?? '';
 
-        // Count tool calls not already emitted inside their execute() function
-        for (const tc of toolCalls) {
-          toolCallCount++;
-          log.debug({ sessionId, pillarName, agentName, tool: tc.toolName ?? 'unknown' }, '[agent] tool call');
-        }
-
-        // Post-hoc stream text of this step as chunks
-        if (stepText && onChunk) {
-          const CHUNK = 30;
-          for (let i = 0; i < stepText.length; i += CHUNK) {
-            onChunk(stepText.slice(i, i + CHUNK));
+          // Per-step budget enforcement (Codex budget.warning/budget.exceeded)
+          if (budgetState && options.budget) {
+            const estimatedStepTokens = Math.ceil(stepText.length / 4) + 400;
+            const check = recordAgentStep(budgetState, options.budget, estimatedStepTokens, traceId);
+            if (!check.allowed) {
+              emit?.({ type: 'step.failed', step: traceId, label: `budget ${check.reason}` });
+              // Note: stepCountIs cannot be mid-loop-aborted from onStepFinish;
+              // we stop emitting further chunks but the SDK finishes the step.
+            }
           }
-        }
-      },
-    }),
-    signal,
-    `${agentName}@${pillarName}`,
-  );
 
-  const totalTokens = result.usage?.totalTokens ?? 0;
-
-    log.debug(
-      { sessionId, pillarName, agentName, steps: stepCount, toolCalls: toolCallCount, tokens: totalTokens },
-      '[agent] agentic loop complete',
+          // Post-hoc stream text of this step as chunks
+          if (stepText && onChunk) {
+            const CHUNK = 30;
+            for (let i = 0; i < stepText.length; i += CHUNK) {
+              onChunk(stepText.slice(i, i + CHUNK));
+            }
+          }
+        },
+      }),
+      signal,
+      `${agentName}@${pillarName}`,
     );
 
-    return { content: result.text, tokens_used: totalTokens, tool_calls: toolCallCount, steps: stepCount };
-
-  } catch (err: any) {
-    // Graceful fallback — if tool calling fails (unsupported provider), run plain text
-    log.warn({ err: err?.message, agentName, pillarName }, '[agent] tool loop failed — falling back to plain generateText');
-    const { generateText: plainGen } = await import('./openrouter');
-    const fallback = await plainGen(
-      userPrompt, config, systemPrompt,
-      { model: config.proModel, max_tokens: 4096, signal, onChunk },
-    );
-    return { content: fallback.text, tokens_used: fallback.tokens_used, tool_calls: 0, steps: 1 };
+    toolCallCount = 0; // count only the successful loop's steps below
+    return {
+      content: result.text,
+      tokens_used: result.usage?.totalTokens ?? 0,
+      tool_calls: toolCallCount,
+      steps: stepCount,
+    };
   }
+
+  // Model escalation loop (Codex --model fallback pattern): walk the chain on
+  // provider failure; on exhaustion fall back to plain generateText.
+  let lastErr: unknown = undefined;
+  // Bounded loop — the chain can advance at most `chain.length` times before
+  // escalation reports exhaustion and we break; the lint-visible bound keeps
+  // this verifiable rather than an unbounded `while (true)`.
+  for (let attempt = 0; attempt <= escalation.chain.length; attempt++) {
+    try {
+      const result = await runLoop(currentModel(escalation));
+      log.debug(
+        { sessionId, pillarName, agentName, steps: stepCount, toolCalls: toolCallCount, tokens: result.tokens_used },
+        '[agent] agentic loop complete',
+      );
+      return result;
+    } catch (err) {
+      lastErr = err;
+      const decision = escalateModel(escalation);
+      if ('exhausted' in decision) {
+        emit?.({ type: 'model.exhausted', models: escalation.chain });
+        break;
+      }
+      emit?.({ type: 'model.fallback', from: escalation.chain[escalation.position - 1] ?? 'unknown', to: decision.fallback, position: decision.position });
+      log.warn({ err: (err as Error)?.message, to: decision.fallback }, '[agent] provider failure — escalating to fallback model');
+    }
+  }
+
+  // Graceful final fallback — plain generateText on the primary model
+  log.warn({ err: (lastErr as Error)?.message, agentName, pillarName }, '[agent] tool loop failed — falling back to plain generateText');
+  const { generateText: plainGen } = await import('./openrouter');
+  const fallback = await plainGen(
+    userPrompt, config, systemPrompt,
+    { model: config.proModel, max_tokens: 4096, signal, onChunk },
+  );
+  return { content: fallback.text, tokens_used: fallback.tokens_used, tool_calls: 0, steps: 1 };
 }

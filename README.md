@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.5.0-blue)
-![Tests](https://img.shields.io/badge/tests-434%20passing-green)
+![Version](https://img.shields.io/badge/version-2.6.0-blue)
+![Tests](https://img.shields.io/badge/tests-469%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,6 +33,42 @@ Five concrete gaps were identified and closed with real working logic:
 - **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
   estimation, verdict, and drift per run — queryable via the new `/runs`,
   `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
+
+## What's New in 2.6.0 — System & Harness SOTA Upgrade (August 2026)
+
+Atomic's engine core was upgraded against the design patterns published by
+OpenAI (Codex), MoonshotAI (Kimi CLI), OpenCode, and the OpenDesign plugin
+platform. All nine upgrades are additive — the 7-pillar architecture is
+untouched.
+
+The **run audit ledger** (`src/engine/runAuditLedger.ts`) records every
+pipeline stage (governor, pillars, prosecutor, rerun, verifier, synthesizer)
+with verdicts, token usage, duration, and notes — persisted to the checkpoint
+store and injected into the synthesizer prompt so the final blueprint is
+grounded in the actual run trajectory (the Codex `Documentation.md` pattern).
+
+The **prompt-parts builder** (`src/engine/promptParts.ts`) assembles every
+agent prompt in a deterministic canonical layer order (system → constraints →
+context → working memory → long-term memory → clarifications → audit ledger →
+task), eliminating prompt-order nondeterminism that invalidates provider-side
+caching (the Codex prompt-cache lesson).
+
+The **quality-delta ratchet** (`src/engine/qualityRatchet.ts`, wired into both
+`blueprintVerifier.ts` and `pipelineVerifier.ts`) enforces the OpenDesign
+high-water-mark rule: a repaired candidate must improve the composite score or
+blocker count, or it is rejected and the best prior round is carried forward —
+repairs can never regress quality.
+
+The **repair loop** now targets real failures: must-fix prompts cite the
+actual validation-gate flags and unresolved prosecutor gaps instead of generic
+placeholders. **Plan-mode milestones** are verified against acceptance
+criteria (`src/engine/milestoneVerifier.ts`) rather than marked passed
+unconditionally. **Per-agent budgets** (`src/engine/agentBudget.ts`) enforce
+step and token caps with warning/hard-stop events and drive a Codex-style
+model-fallback escalation chain on provider failure. The **memory subsystem**
+detects conflicting agent decisions across pillars (`src/engine/memorySync.ts`,
+`memory.conflict_detected` events) and syncs run decisions to long-term memory
+at run end. The suite is covered by 35 new tests — **469 passing total**.
 
 ## What's New in 2.5.0 — SDK + MCP Hardening (August 2026)
 

@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { generateJson } from './openrouter';
+import { createPromptParts, addLayer, getPromptParts } from './promptParts';
+import { loadLedger, renderAuditBlock, type RunAuditLedger } from './runAuditLedger';
 import { Blueprint, BlueprintSections, BlueprintSectionsSchema, ProsecutorResult, GovernorIntent, EngineEvent, ModelConfig, PILLAR_COUNT, PillarOutputMap } from './types';
 import { EFFORT_TOKEN_BUDGETS } from './config';
 import { PROVIDERS } from '../lib/providers';
@@ -19,7 +21,8 @@ export async function runSynthesizer(
   pillars: PillarOutputMap,
   prosecutor: ProsecutorResult,
   emit: (event: EngineEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<Blueprint> {
   emit({ type: 'synthesizer_start' });
 
@@ -42,12 +45,28 @@ A skilled engineer who has never seen the original prompt must be able to implem
     return `## ${name}\n${content}`;
   }).join('\n\n');
 
-  const context = `Intent:\n${JSON.stringify(intent, null, 2)}\n\nPillars:\n${pillarSummaries}\n\nProsecutor:\n${JSON.stringify(prosecutor, null, 2)}`;
+  // v2.6.0 — deterministic prompt-layer ordering (Codex cache lesson): the
+  // system prompt and context are assembled through the prompt-parts builder
+  // so every repair/synthesis prompt has a stable layer sequence, which
+  // maximises provider-level prompt caching and avoids quadratic drift
+  // across verifier rounds.
+  const parts = createPromptParts();
+  addLayer(parts, 'system', systemPrompt);
+  addLayer(parts, 'context', `Intent:\n${JSON.stringify(intent, null, 2)}\n\nPillars:\n${pillarSummaries}\n\nProsecutor:\n${JSON.stringify(prosecutor, null, 2)}`);
+  if (sessionId) {
+    try {
+      const ledger: RunAuditLedger | null = await loadLedger(sessionId);
+      if (ledger) addLayer(parts, 'audit_ledger', renderAuditBlock(ledger));
+    } catch {
+      // Ledger unavailable — synthesis proceeds without the audit block.
+    }
+  }
+  const context = getPromptParts(parts);
 
   const { data: sections, tokens_used: synthTokens } = await generateJson<BlueprintSections>(
-    context, 
+    context,
     config,
-    BlueprintSectionsSchema, 
+    BlueprintSectionsSchema,
     systemPrompt,
     { model: config.proModel, max_tokens: EFFORT_TOKEN_BUDGETS[config.effort ?? 'medium'], extended_thinking: config.thinkingEnabled ?? true, signal }
   );
