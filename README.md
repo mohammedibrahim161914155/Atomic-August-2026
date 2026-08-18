@@ -1,6 +1,6 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.3.0-blue)
+![Version](https://img.shields.io/badge/version-2.4.0-blue)
 ![Tests](https://img.shields.io/badge/tests-337%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)

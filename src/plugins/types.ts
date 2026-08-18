@@ -55,6 +55,16 @@ export type PluginPermission =
   | 'events:publish'
   | 'network:outbound';
 
+/** Runtime value arrays for manifest validation (Zod enum input). */
+export const PLUGIN_CATEGORIES = [
+  'export', 'import', 'transform', 'integration', 'visualization', 'automation', 'developer',
+] as const satisfies readonly PluginCategory[];
+
+export const PLUGIN_PERMISSIONS = [
+  'blueprint:read', 'blueprint:write', 'versions:read', 'versions:write',
+  'skills:read', 'skills:write', 'events:subscribe', 'events:publish', 'network:outbound',
+] as const satisfies readonly PluginPermission[];
+
 // ── Plugin context ────────────────────────────────────────────────────────────
 
 /** The context object injected into every plugin hook */
@@ -151,4 +161,14 @@ export interface RegisteredPlugin {
   enabled:  boolean;
   loadedAt: string;
   error?:   string;
+  /** Content-addressed digest over the plugin's behaviour-defining fields */
+  digest?:                string;
+  /** Doctor warnings from manifest validation (empty array when clean) */
+  doctorWarnings?:        string[];
+  /** Doctor errors from manifest validation (registration proceeds but is flagged) */
+  doctorErrors?:          string[];
+  /** Consecutive hook failures — the plugin auto-disables at 3 */
+  consecutiveErrors?:     number;
+  /** Most recent health-check result (set by checkHealth / checkAllHealth) */
+  lastHealth?:            { healthy: boolean; message?: string; checkedAt?: string };
 }

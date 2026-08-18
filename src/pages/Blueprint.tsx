@@ -17,6 +17,11 @@ import {
 import { VersionHistory } from '../components/VersionHistory';
 import { startRerunPillar } from '../lib/sse';
 import { EngineEvent } from '../engine/types';
+import {
+  pluginRegistry,
+  initBuiltInPlugins,
+  toSdkBlueprint,
+} from '../plugins';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -169,23 +174,77 @@ export default function BlueprintView({ blueprint, onReset, savedNotes = {} }: P
   const [exportingHtml,    setExportingHtml]    = useState(false);
   const [sidebarOpen,        setSidebarOpen]        = useState(true);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [pluginNotice,       setPluginNotice]       = useState<string | null>(null);
+  const [pushingTo,          setPushingTo]          = useState<string | null>(null);
   const cancelRerunRef = useRef<(() => void) | null>(null);
+
+  // v2.4.0 — register the built-in client plugins (Markdown / Linear / Notion
+  // exporters) once when the blueprint view mounts. `register()` is idempotent,
+  // so this is safe across repeated mounts.
+  useEffect(() => {
+    initBuiltInPlugins();
+    // Give the export pipeline the live blueprint so runExport produces a
+    // version-aware document instead of a stale snapshot. The engine's
+    // internal blueprint shape is adapted to the SDK blueprint model used by
+    // the client plugin platform.
+    pluginRegistry.setBlueprint(toSdkBlueprint(blueprint));
+  }, [blueprint]);
 
   const togglePillar = useCallback((p: string) => {
     setExpandedPillars(prev => ({ ...prev, [p]: !prev[p] }));
   }, []);
 
-  const downloadMd = useCallback(() => {
-    let md = `# ${currentBlueprint.intent?.product_name ?? 'Blueprint'}\n\n`;
-    md += `**Generated:** ${new Date(currentBlueprint.created_at).toLocaleString()}\n`;
-    md += `**Quality Score:** ${currentBlueprint.quality_score}/100\n\n`;
-    md += `> ${currentBlueprint.prompt}\n\n---\n\n`;
-    Object.entries(currentBlueprint.sections).forEach(([key, content]) => {
-      md += `## ${sectionTitle(key)}\n\n${content}\n\n`;
-    });
-    const blob = new Blob([md], { type: 'text/markdown' });
-    triggerDownload(URL.createObjectURL(blob), `blueprint-${currentBlueprint.id}.md`);
+  const downloadMd = useCallback(async () => {
+    // v2.4.0 — Markdown export is now routed through the hardened plugin
+    // registry (runExport runs the 'built-in/export-markdown' plugin, which
+    // executes registered transforms and honors plugin enable state). If the
+    // plugin registry is unavailable for any reason we fall back to the plain
+    // inline rendering so export is never broken.
+    try {
+      const exported = await pluginRegistry.runExport('built-in/export-markdown');
+      const md = exported instanceof Blob
+        ? await exported.text()
+        : (exported ?? String(exported ?? ''));
+      if (md) {
+        triggerDownload(URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), `blueprint-${currentBlueprint.id}.md`);
+        setPluginNotice('Exported via plugin pipeline');
+      } else {
+        throw new Error('empty export');
+      }
+    } catch {
+      let md = `# ${currentBlueprint.intent?.product_name ?? 'Blueprint'}\n\n`;
+      md += `**Generated:** ${new Date(currentBlueprint.created_at).toLocaleString()}\n`;
+      md += `**Quality Score:** ${currentBlueprint.quality_score}/100\n\n`;
+      md += `> ${currentBlueprint.prompt}\n\n---\n\n`;
+      Object.entries(currentBlueprint.sections).forEach(([key, content]) => {
+        md += `## ${sectionTitle(key)}\n\n${content}\n\n`;
+      });
+      triggerDownload(URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), `blueprint-${currentBlueprint.id}.md`);
+      setPluginNotice('Exported (fallback render)');
+    }
   }, [currentBlueprint]);
+
+  // v2.4.0 — push the blueprint to an external project tracker (Linear / Notion)
+  // through the registry's runPush pipeline (retryable HTTP, 429 backoff).
+  const pushTo = useCallback(async (pluginId: 'built-in/export-linear' | 'built-in/export-notion') => {
+    setPushingTo(pluginId);
+    setPluginNotice(null);
+    try {
+      pluginRegistry.setBlueprint(toSdkBlueprint(blueprint));
+      const result = await pluginRegistry.runPush(pluginId);
+      if (result?.url) {
+        setPluginNotice(`Pushed to ${pluginId === 'built-in/export-linear' ? 'Linear' : 'Notion'}: ${result.url}`);
+      } else if (result?.id) {
+        setPluginNotice(`Created ${pluginId === 'built-in/export-linear' ? 'Linear issue' : 'Notion page'} (${result.id}) — requires API key in Plugins panel`);
+      } else {
+        setPluginNotice(`No configuration found for ${pluginId === 'built-in/export-linear' ? 'Linear' : 'Notion'} — open the Plugins panel to add your API key`);
+      }
+    } catch {
+      setPluginNotice(`Push to ${pluginId === 'built-in/export-linear' ? 'Linear' : 'Notion'} failed — check your API key and try again`);
+    } finally {
+      setPushingTo(null);
+    }
+  }, [blueprint]);
 
 
   const downloadHtml = useCallback(async () => {
@@ -282,6 +341,29 @@ export default function BlueprintView({ blueprint, onReset, savedNotes = {} }: P
           >
             <Download size={12} /> Markdown
           </button>
+          {/* v2.4.0 — push the blueprint to Linear / Notion via the plugin pipeline */}
+          <button
+            onClick={() => pushTo('built-in/export-linear')}
+            disabled={pushingTo !== null}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg
+                       text-white/60 hover:text-white hover:bg-white/10 transition-colors
+                       disabled:opacity-40"
+            title="Push blueprint to Linear (retryable API, 429-aware)"
+          >
+            {pushingTo === 'built-in/export-linear' ? <RefreshCw size={12} className="animate-spin" /> : <Layers size={12} />}
+            {pushingTo === 'built-in/export-linear' ? 'Pushing…' : 'Linear'}
+          </button>
+          <button
+            onClick={() => pushTo('built-in/export-notion')}
+            disabled={pushingTo !== null}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg
+                       text-white/60 hover:text-white hover:bg-white/10 transition-colors
+                       disabled:opacity-40"
+            title="Push blueprint to Notion (retryable API, 429-aware)"
+          >
+            {pushingTo === 'built-in/export-notion' ? <RefreshCw size={12} className="animate-spin" /> : <BookOpen size={12} />}
+            {pushingTo === 'built-in/export-notion' ? 'Pushing…' : 'Notion'}
+          </button>
           <button
             onClick={downloadHtml}
             disabled={exportingHtml}
@@ -312,7 +394,19 @@ export default function BlueprintView({ blueprint, onReset, savedNotes = {} }: P
           </button>
         </div>
       </header>
-
+      {/* ── v2.4.0 plugin notice toast (export/push feedback) ─────── */}
+      {pluginNotice && (
+        <div
+          className="fixed top-5 left-1/2 -translate-x-1/2 z-[110] max-w-md px-4 py-2.5 rounded-xl shadow-2xl
+                      bg-white border border-gray-200 text-xs font-medium text-gray-700
+                      flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200"
+          role="status" aria-live="polite"
+          onClick={() => setPluginNotice(null)}
+        >
+          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+          {pluginNotice}
+        </div>
+      )}
       {/* ── Version History slide-over ──────────────────────────────── */}
       {showVersionHistory && (
         <div className="fixed inset-0 z-50 flex justify-end">

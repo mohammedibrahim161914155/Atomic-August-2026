@@ -10,30 +10,37 @@
 
 import type { PluginDefinition, IntegrationPlugin, PluginContext } from '../types';
 import type { Blueprint } from '../../sdk/types';
+import { requestWithRetry } from '../http';
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 
+/**
+ * Retryable Notion REST call. Uses the shared `requestWithRetry` pipeline:
+ * exponential backoff + jitter on transient statuses (429/500/502/503/504)
+ * with explicit `Retry-After` honoring for 429 rate-limit responses, and a
+ * 15-second per-attempt timeout. POSTs to pages/blocks are not strictly
+ * idempotent, so retries are limited to transient server/rate-limit codes.
+ */
 async function notionPost<T>(
   apiKey: string,
   path:   string,
   body:   unknown,
   method: 'POST' | 'PATCH' | 'GET' = 'POST',
 ): Promise<T> {
-  const res = await fetch(`${NOTION_API}${path}`, {
+  const retryable = await requestWithRetry<unknown>(`${NOTION_API}${path}`, {
     method,
     headers: {
       'Authorization':  `Bearer ${apiKey}`,
       'Content-Type':   'application/json',
       'Notion-Version': NOTION_VERSION,
     },
-    body: method !== 'GET' ? JSON.stringify(body) : undefined,
+    body:      method !== 'GET' ? JSON.stringify(body) : undefined,
+    timeout:   15_000,
+    maxRetries: 3,
+    retrySafe:  false, // POST creates pages/blocks; only transient codes retry
   });
-  if (!res.ok) {
-    const err = await res.json() as { message?: string };
-    throw new Error(`Notion API error: ${err.message ?? `HTTP ${res.status}`}`);
-  }
-  return res.json() as Promise<T>;
+  return retryable.data as T;
 }
 
 function textToRichText(text: string, maxLength = 1990): { type: 'text'; text: { content: string } }[] {

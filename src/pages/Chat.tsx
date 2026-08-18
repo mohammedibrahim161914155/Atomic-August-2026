@@ -4,7 +4,7 @@
  * Key features per §1 spec:
  *  - True EmptyGreetingState + ActiveThreadState subtrees (no shared conditional tree)
  *  - Slash-command `/` skill picker (keyboard navigable: ↑↓ Enter Esc, cursor-anchored)
- *  - `+` menu with 3 exact sections: Context Attachment | Capabilities | Tools
+ *  - `+` menu with 4 exact sections: Context Attachment | Capabilities | Tools | Plugins (v2.4.0)
  *  - Two-level model/effort/thinking selector
  *  - 5 Quick Action Pills (Start Scoping, Resume Blueprint, Explore Blueprint, Review Changes, Atomic's Pick)
  *  - Dynamic System Status Banner with per-notice localStorage dismissal
@@ -31,6 +31,8 @@ import ReactMarkdown from 'react-markdown';
 import { loadClientConfig } from '../lib/config';
 import { PROVIDERS } from '../lib/providers';
 import { BUILT_IN_SKILLS } from '../engine/skills';
+import { initBuiltInPlugins } from '../plugins';
+import { PluginPanel } from '../components/PluginPanel';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -413,9 +415,14 @@ export default function Chat() {
     };
   });
 
+  // v2.4.0 — register the built-in client plugins once (Markdown/Linear/Notion
+  // exporters) so the Chat plugins panel and Blueprint export push paths share
+  // one registry instance. `register()` is idempotent across repeated mounts.
+  useEffect(() => { initBuiltInPlugins(); }, []);
+
   // Popovers
   const [showPlusMenu,     setShowPlusMenu]     = useState(false);
-  const [plusTab,          setPlusTab]          = useState<'context' | 'capabilities' | 'tools'>('context');
+  const [plusTab,          setPlusTab]          = useState<'context' | 'capabilities' | 'tools' | 'plugins'>('context');
 
   // Slash picker — slashPos is the caret-relative coords inside the textarea
   const [slashOpen,  setSlashOpen]  = useState(false);
@@ -1478,8 +1485,8 @@ function ContextAttachmentPanel({ fileRef, onInjectContext, onClose }: {
 // ── PlusMenuPopover (3 sections: Context | Capabilities | Tools) ──────────────
 
 function PlusMenuPopover({ tab, setTab, composerConfig, setComposerConfig, onClose, onInjectContext }: {
-  tab:              'context' | 'capabilities' | 'tools';
-  setTab:           (t: 'context' | 'capabilities' | 'tools') => void;
+  tab:              'context' | 'capabilities' | 'tools' | 'plugins';
+  setTab:           (t: 'context' | 'capabilities' | 'tools' | 'plugins') => void;
   composerConfig:   ComposerConfig;
   setComposerConfig:React.Dispatch<React.SetStateAction<ComposerConfig>>;
   onClose:          () => void;
@@ -1503,6 +1510,7 @@ function PlusMenuPopover({ tab, setTab, composerConfig, setComposerConfig, onClo
           { id: 'context',      label: 'Context',      icon: FolderOpen },
           { id: 'capabilities', label: 'Capabilities', icon: Layers     },
           { id: 'tools',        label: 'Tools',        icon: Globe      },
+          { id: 'plugins',      label: 'Plugins',      icon: Plug       },
         ] as const).map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors
@@ -1554,12 +1562,24 @@ function PlusMenuPopover({ tab, setTab, composerConfig, setComposerConfig, onClo
               })}
             </div>
             <div className="h-px bg-gray-100 mb-2" />
-            <button className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left hover:bg-gray-50 transition-colors text-gray-400 text-xs">
-              <Plug size={12} /> Connectors <span className="ml-auto text-[10px] bg-gray-100 px-1.5 py-0.5 rounded">Coming soon</span>
+            <button
+              onClick={() => setTab('plugins')}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left hover:bg-gray-50 transition-colors text-xs"
+            >
+              <Plug size={12} className="text-violet-500" />
+              <span className="text-gray-700 font-medium">Manage plugins</span>
+              <span className="ml-auto text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded font-medium">Plugins</span>
             </button>
-            <button className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-left hover:bg-gray-50 transition-colors text-gray-400 text-xs">
-              <Plus size={12} /> Add plugins… <span className="ml-auto text-[10px] bg-gray-100 px-1.5 py-0.5 rounded">Coming soon</span>
-            </button>
+          </div>
+        )}
+
+        {/* Plugins (v2.4.0 — real plugin panel: health, enable/disable, config) */}
+        {tab === 'plugins' && (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 mb-2">
+              Client Plugins <span className="text-[10px] bg-violet-50 text-violet-600 px-1.5 py-0.5 rounded ml-1">v2.4.0</span>
+            </p>
+            <PluginPanel />
           </div>
         )}
 

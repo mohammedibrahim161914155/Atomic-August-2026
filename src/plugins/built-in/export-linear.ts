@@ -11,6 +11,7 @@
 
 import type { PluginDefinition, IntegrationPlugin, PluginContext } from '../types';
 import type { Blueprint } from '../../sdk/types';
+import { requestWithRetry } from '../http';
 
 interface LinearProject { id: string; name: string; url: string }
 interface LinearIssue { id: string; title: string; identifier: string }
@@ -24,23 +25,37 @@ const SECTION_PRIORITY: Record<string, number> = {
   testing_strategy: 6,
 };
 
+const LINEAR_API_URL = 'https://api.linear.app/graphql';
+
+/**
+ * Retryable Linear GraphQL POST. Uses the shared `requestWithRetry` pipeline:
+ * exponential backoff + jitter on transient statuses (429/500/502/503/504),
+ * server-sent `Retry-After` handling, and a 15-second per-attempt timeout.
+ * Rate-limit responses (429) never fail permanently — the wait is honored.
+ */
 async function linearPost<T>(
   apiKey: string,
   query: string,
   variables?: Record<string, unknown>,
 ): Promise<T> {
-  const res = await fetch('https://api.linear.app/graphql', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': apiKey,
+  const retryable = await requestWithRetry<{ data?: T; errors?: { message: string }[] }>(
+    LINEAR_API_URL,
+    {
+      method:   'POST',
+      headers:  {
+        'Content-Type':  'application/json',
+        'Authorization': apiKey,
+      },
+      body:      JSON.stringify({ query, variables }),
+      timeout:   15_000,
+      maxRetries: 3,
+      retrySafe:  true, // GraphQL project/issue creation is effectively idempotent under our error handling
     },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) throw new Error(`Linear API error: HTTP ${res.status}`);
-  const json = await res.json() as { data?: T; errors?: { message: string }[] };
-  if (json.errors?.length) throw new Error(json.errors[0]!.message);
-  return json.data as T;
+  );
+  if (retryable.data?.errors?.length) {
+    throw new Error(retryable.data.errors[0]!.message);
+  }
+  return retryable.data as T;
 }
 
 const plugin: IntegrationPlugin = {

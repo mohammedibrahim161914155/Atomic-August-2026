@@ -2,6 +2,55 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.4.0] — August 2026
+
+### Added — client-side export plugin platform (engine-plugin quality parity)
+
+The client-side plugin system (`src/plugins/`) is upgraded to the same quality
+bar as the engine plugin platform: Zod doctor validation, content-addressed
+digests, capability gating, retryable HTTP, typed configuration, error
+budgets, health checks, and localStorage persistence.
+
+- `src/plugins/doctor.ts` — **Zod manifest validation + cross-field doctor
+  rules** (`validateManifest`, `validatePluginDefinition`, `doctor`),
+  `TRUSTED_BUILTIN_IDS` allow-list, namespace-ownership checks, and
+  category/permission coherence warnings.
+- `src/plugins/digest.ts` — **content-addressed plugin digests**: 16-hex
+  SHA-256 over behaviour-defining fields with an FNV-1a 128-bit fallback when
+  `crypto.subtle` is unavailable.
+- `src/plugins/capabilities.ts` — **hook capability gating**: the
+  `HOOK_CAPABILITIES` table maps every hook (`execute`/`push`/`pull`/…)
+  to the minimum `PluginPermission[]` required; `checkCapability` /
+  `capabilityError` power the registry's guard before any hook fires.
+- `src/plugins/http.ts` — **retryable HTTP**: `requestWithRetry` with
+  exponential backoff + jitter, `429 Retry-After` parsing (`parseRetryAfter`),
+  timeout budgets, and a deterministic `HttpRetryExhaustedError`.
+- `src/plugins/config.ts` — **typed per-plugin configuration schemas**
+  (Linear / Notion / Markdown) with defaults and `validatePluginConfig`.
+- `src/plugins/registry.ts` — **fully rewritten registry**: doctor validation
+  on every `register()`, async digests, capability gating per hook, error
+  budgets (auto-disable at 3 consecutive hook failures), health check APIs
+  (`checkHealth`, `checkAllHealth`), and localStorage persistence of enabled
+  state and last health results.
+- `src/plugins/built-in/export-linear.ts` / `export-notion.ts` — rewritten
+  with retryable HTTP, `429 Retry-After` handling, pull support (Notion), and
+  richer health checks.
+- `src/components/PluginPanel.tsx` — **real plugin panel** in the Chat `+`
+  menu: live health status, enable/disable toggles, doctor warning surfacing,
+  and a config dialog for the Linear / Notion API keys with connection tests.
+- Blueprint toolbar now exposes **Linear / Notion push buttons** routed
+  through `registry.runPush`, with a toast notice for export/push feedback.
+- `Blueprint.tsx` Markdown export is routed through `registry.runExport`
+  with a plain-render fallback so export is never broken.
+- `src/plugins/index.ts` — `toSdkBlueprint` adapter unifies the engine's
+  internal blueprint shape with the SDK `Blueprint` model consumed by the
+  plugin platform; all platform modules are re-exported.
+- 58 new tests in `src/plugins/__tests__/exportPlugins.test.ts` (doctor,
+  digest stability, capability gating, HTTP retry/backoff/429, registry
+  lifecycle, health, error budget, persistence) — **395/395 passing**.
+- React pinned to **19.1.4** (19.2 removed `React.act`, breaking
+  ErrorBoundary tests).
+
 ## [2.3.0] — August 2026
 
 ### Added — engine plugin platform (OpenDesign plugin parity + universal SKILL.md bridge)
