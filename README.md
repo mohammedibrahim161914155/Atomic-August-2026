@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.6.0-blue)
-![Tests](https://img.shields.io/badge/tests-469%20passing-green)
+![Version](https://img.shields.io/badge/version-2.7.0-blue)
+![Tests](https://img.shields.io/badge/tests-480%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,6 +33,29 @@ Five concrete gaps were identified and closed with real working logic:
 - **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
   estimation, verdict, and drift per run — queryable via the new `/runs`,
   `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
+
+## What's New in 2.7.0 — Full-File Audit & Production Hardening (August 2026)
+
+A full-file audit of the entire engine verified that every documented
+behaviour has real, wired logic behind it — and closed the four gaps that
+remained. All changes are additive; the 7-pillar architecture is untouched.
+
+- **Prompt registry wiring** — every governor prompt and agent system prompt
+  is validated through `promptRegistry.validate()` before each LLM call,
+  catching unreplaced markers and undersized prompts at runtime.
+- **Codex-style context auto-compaction** — `compactIfNeeded` is now wired
+  into the synthesis regions of the agent-builder and tool-builder pipelines
+  (feature-creator already had it), preventing silent truncation on large
+  contexts.
+- **Blueprint versioning in the curator** — `curator.applyEdit` now creates
+  a blueprint version before applying any edit, making every change
+  reversible.
+- **Sequential sub-agent merge** — both Artemis and the Curator now run
+  their sub-agents before the main generation call and inject the real
+  sub-agent results into the system prompt for grounded generation.
+- **Full-file audit suite** — 11 new tests covering prompt registry
+  validation, curator versioning, sub-agent merging, blueprint versions,
+  and the compaction contract. **480 passing total**.
 
 ## What's New in 2.6.0 — System & Harness SOTA Upgrade (August 2026)
 

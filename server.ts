@@ -2720,7 +2720,7 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
       const parsed = BlueprintSchema.safeParse(bpRaw);
       if (!parsed.success) { res.status(400).json({ error: 'Invalid blueprint' }); return; }
       const { applyEdit } = await import('./src/engine/curator');
-      const updatedBlueprint = applyEdit(req.params.sessionId!, editId, parsed.data);
+      const updatedBlueprint = await applyEdit(req.params.sessionId!, editId, parsed.data);
       res.json({ blueprint: updatedBlueprint });
     } catch (err: any) {
       res.status(400).json({ error: err?.message });

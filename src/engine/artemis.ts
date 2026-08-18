@@ -26,7 +26,8 @@ import { composeSkillsPrompt } from './skills';
 import { startSpan } from './observability';
 import { getDb } from './store.sqlite';
 import { randomUUID } from 'crypto';
-import { runArtemisSubAgents, formatSubAgentContext } from './artemisSubAgents';
+import { runArtemisSubAgents, formatSubAgentContext, type ArtemisSubAgentResults } from './artemisSubAgents';
+import { promptRegistry } from './promptRegistry';
 import { formatLongTermContext, rememberFact } from './agentLongTermMemory';
 
 // ── Project Brief Schema ───────────────────────────────────────────────────────
@@ -305,46 +306,72 @@ async function generateBrief(
   // Pull cross-session long-term memory to enrich brief generation
   const longTermCtx = formatLongTermContext('artemis', 15);
 
-  // Run sub-agents in parallel with the main brief generation for maximum quality
-  log.info({ sessionId }, '[artemis] launching sub-agents + brief generation in parallel');
+  // Run sub-agents FIRST so their analysis (requirements, tech stack, timeline,
+  // risks) is available to the brief generator. This guarantees the generated
+  // brief is grounded in the specialist analysis rather than receiving it after
+  // the fact (sequential fan-out/fan-in, not a parallel race).
+  log.info({ sessionId }, '[artemis] launching sub-agents before brief generation');
+  const subResult = await Promise.resolve(runArtemisSubAgents(sessionId, transcript, longTermCtx, config)).catch(() => null);
+  const subCtx = subResult?.succeededCount
+    ? formatSubAgentContext(subResult)
+    : '';
 
-  const [subResults, briefResult] = await Promise.allSettled([
-    runArtemisSubAgents(sessionId, transcript, longTermCtx, config),
-    (async () => {
-      // We need sub-agent context to enrich the brief — run sub-agents first on fast path,
-      // then generate object. In the Promise.allSettled we capture both and merge.
-      return generateObject({
-        model,
-        schema: ProjectBriefSchema.omit({ completedAt: true, artemisSessionId: true }),
-        system: `You are a senior solutions architect extracting a structured Project Brief from a scoping conversation.
+  const subResults: PromiseSettledResult<ArtemisSubAgentResults> = subResult
+    ? { status: 'fulfilled', value: subResult }
+    : { status: 'rejected', reason: new Error('sub-agents unavailable') };
+
+
+  // v2.7.0 — compose the brief-generation prompt via the prompt registry so the
+  // assembled prompt is validated for coherence (no unreplaced markers, min length)
+  // before it is sent to the model.
+  let briefSystemPrompt = `You are a senior solutions architect extracting a structured Project Brief from a scoping conversation.
 
 CRITICAL RULES:
 - Extract all information precisely as discussed — never fabricate or embellish
 - For missing information, note it in openQuestions
 - Mark items as assumptions in constraints.technical when the user proceeded without confirming them
 - confidenceScore reflects completeness (0-1): < 0.5 = incomplete, 0.75+ = ready to proceed
-- Generate a realistic task breakdown with phases, milestones, and components based on project scope
-- If sub-agent analysis is provided below, use it to enrich the brief's techStack and taskBreakdown sections
-${longTermCtx ? `\nPast session context:\n${longTermCtx}` : ''}`,
-        messages: [{ role: 'user', content: `Scoping conversation transcript:\n\n${transcript}` }],
-        maxOutputTokens: 4096,
-        temperature: 0,
-      });
-    })(),
-  ]);
-
-  if (briefResult.status === 'rejected') {
-    span.finish('brief_generation_failed', {}, { level: 'error', error: briefResult.reason });
-    throw briefResult.reason;
+- Generate a realistic task breakdown with phases, milestones, and components based on project scope`;
+  if (subCtx) {
+    briefSystemPrompt += `\n\n## Specialist Sub-Agent Analysis\n\nThe following specialist analysis was produced before this brief. Use it to ground the techStack and taskBreakdown — do not contradict it without explicit justification:\n\n${subCtx}`;
+  }
+  if (longTermCtx) {
+    briefSystemPrompt += `\n\nPast session context:\n${longTermCtx}`;
   }
 
-  const { object } = briefResult.value;
+  const briefValidation = promptRegistry.validate(briefSystemPrompt);
+  if (!briefValidation.valid) {
+    log.warn({ errors: briefValidation.errors, sessionId }, '[artemis] brief prompt validation warnings');
+  }
 
-  // Merge sub-agent analysis into the brief's task breakdown and tech stack where available
-  if (subResults.status === 'fulfilled' && subResults.value.succeededCount > 0) {
+  const briefResult = await generateObject({
+    model,
+    schema: ProjectBriefSchema.omit({ completedAt: true, artemisSessionId: true }),
+    system: briefSystemPrompt,
+    messages: [{ role: 'user', content: `Scoping conversation transcript:\n\n${transcript}` }],
+    maxOutputTokens: 4096,
+    temperature: 0,
+  });
+
+  const object = briefResult.object;
+
+  // Ground the brief's task breakdown and tech stack in the specialist analysis.
+  if (subResults.status === 'fulfilled' && subResults.value?.succeededCount) {
     const sub = subResults.value;
-    const subCtx = formatSubAgentContext(sub);
     log.info({ sessionId, succeededCount: sub.succeededCount, durationMs: sub.durationMs }, '[artemis] sub-agents enriched brief');
+
+    if (sub.techStack?.backend?.length) {
+      object.techStack.backend = sub.techStack.backend.map((c: { name: string }) => c.name).slice(0, 6);
+    }
+    if (sub.techStack?.frontend?.length) {
+      object.techStack.frontend = sub.techStack.frontend.map((c: { name: string }) => c.name).slice(0, 6);
+    }
+    if (sub.techStack?.database?.length) {
+      object.techStack.database = sub.techStack.database.map((c: { name: string }) => c.name).slice(0, 3);
+    }
+    if (sub.timeline?.realisticWeeks) {
+      object.constraints.timeline = `${sub.timeline.realisticWeeks} weeks realistic (${sub.timeline.optimisticWeeks}–${sub.timeline.pessimisticWeeks}w range)`;
+    }
 
     // Persist sub-agent insights to long-term memory for future sessions
     if (sub.risks?.overallRiskLevel) {

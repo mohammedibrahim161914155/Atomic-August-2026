@@ -416,11 +416,40 @@ export async function runAgentBuilderPipeline(
   }
   emitFn({ type: 'governor_done', intent: { app_name: 'Agent Builder', description: input.agentRole } as any });
 
-  const synthesisPrompt =
+  // Codex-style context auto-compaction: when the assembled context exceeds
+  // the pro model's window, summarise the pillar outputs and continue
+  // instead of truncating reactively.
+  const rawSynthesisPrompt =
     PILLARS.map((p, i) => `=== ${p.name.toUpperCase()} ===\n${pillarOutputs[i]}`).join('\n\n') +
     `\n\nOriginal Agent Role: ${input.agentRole}` +
     `\nCapabilities: ${input.agentCapabilities}` +
     `\nConstraints: ${input.agentConstraints}`;
+
+  let synthesisPrompt = rawSynthesisPrompt;
+  let _compacted = false;
+  let _compactTokens = 0;
+  try {
+    const { compactIfNeeded } = await import('../../engine/contextCompactor');
+    const { estimateTokens } = await import('../../engine/contextBudget');
+    const capacity = 200_000; // conservative pro-model window
+    const used = estimateTokens(rawSynthesisPrompt) + 10_000;
+    const compactedResult = await compactIfNeeded({
+      usedTokens: used,
+      capacity,
+      history: [rawSynthesisPrompt],
+      config,
+      signal,
+    });
+    synthesisPrompt = compactedResult.context || rawSynthesisPrompt;
+    _compacted = compactedResult.compacted;
+    _compactTokens = compactedResult.tokens_used;
+    if (compactedResult.decision.action === 'warn' || compactedResult.decision.action === 'compact') {
+      emitFn({ type: 'context.compaction', message: `Context ${compactedResult.decision.action} at ${(compactedResult.decision.utilization * 100).toFixed(0)}% utilisation` } as EngineEvent);
+    }
+  } catch (err) {
+    log.error({ err }, '[agent-builder] compaction check failed — using raw context');
+    _compacted = false;
+  }
 
     const synthesisResult = await withRetry(
     () => generateJson<AgentBlueprint>(

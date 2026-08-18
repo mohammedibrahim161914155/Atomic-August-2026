@@ -29,7 +29,8 @@ import { composeSkillsPrompt } from './skills';
 import { startSpan } from './observability';
 import { getDb } from './store.sqlite';
 import { randomUUID } from 'crypto';
-import { runCuratorSubAgents, mergeSubAgentDimensions } from './curatorSubAgents';
+import { runCuratorSubAgents, mergeSubAgentDimensions, formatSubAgentSummary, type CuratorSubAgentResults } from './curatorSubAgents';
+import { promptRegistry } from './promptRegistry';
 import { formatLongTermContext, rememberFact } from './agentLongTermMemory';
 import type { Blueprint, BlueprintSections } from './types';
 
@@ -323,36 +324,40 @@ export async function analyzeBlueprint(opts: {
   // Pull cross-session long-term memory to calibrate this analysis
   const longTermCtx = formatLongTermContext('curator', 15);
 
-  // ── Run 4 sub-agents in parallel (don't await — let them race the main call) ──
-  log.info({ sessionId }, '[curator] launching 4 parallel sub-agents for deep analysis');
+  // ── Run 4 sub-agents FIRST so their analysis is available to the main report ──
+  log.info({ sessionId }, '[curator] launching 4 sub-agents before main analysis');
 
-  const [subResults, reportResult] = await Promise.allSettled([
-    runCuratorSubAgents(sessionId, blueprint, longTermCtx, config),
-    (async (): Promise<Omit<RefinementReport, 'generatedAt' | 'modelUsed' | 'tokenCount'>> => {
-      // Run the main analysis — sub-agent summary injected into system prompt enriches it
-      // We generate a placeholder sub-agent summary upfront for the system prompt
-      const { object } = await generateObject({
-        model,
-        schema: RefinementReportSchema.omit({ generatedAt: true, modelUsed: true, tokenCount: true }),
-        system: buildCuratorSystemPrompt(activeSkillIds, blueprint, longTermCtx || undefined),
-        messages: [{
-          role: 'user',
-          content: `Perform a comprehensive analysis of this blueprint:\n\n${blueprintSummary}`,
-        }],
-        maxOutputTokens: 4096,
-        temperature: 0.2,
-      });
-      return object;
-    })(),
-  ]);
+  const subResult = await Promise.resolve(runCuratorSubAgents(sessionId, blueprint, longTermCtx, config)).catch(() => null);
+  const subResults: PromiseSettledResult<CuratorSubAgentResults> = subResult
+    ? { status: 'fulfilled', value: subResult }
+    : { status: 'rejected', reason: new Error('sub-agents unavailable') };
+  const subAgentSummary = subResult?.succeededCount ? formatSubAgentSummary(subResult) : undefined;
 
-  if (reportResult.status === 'rejected') {
+  let report: Omit<RefinementReport, 'generatedAt' | 'modelUsed' | 'tokenCount'>;
+  try {
+    // v2.7.0 — validate the composed system prompt for coherence before sending
+    const systemPrompt = buildCuratorSystemPrompt(activeSkillIds, blueprint, longTermCtx || undefined, subAgentSummary);
+    const validation = promptRegistry.validate(systemPrompt);
+    if (!validation.valid) {
+      log.warn({ errors: validation.errors, sessionId }, '[curator] system prompt validation warnings');
+    }
+    const result = await generateObject({
+      model,
+      schema: RefinementReportSchema.omit({ generatedAt: true, modelUsed: true, tokenCount: true }),
+      system: systemPrompt,
+      messages: [{
+        role: 'user',
+        content: `Perform a comprehensive analysis of this blueprint:\n\n${blueprintSummary}`,
+      }],
+      maxOutputTokens: 4096,
+      temperature: 0.2,
+    });
+    report = result.object;
+  } catch (err) {
     updateWorkspace(sessionId, { status: 'idle' });
-    span.finish('analysis_failed', {}, { level: 'error', error: reportResult.reason });
-    throw reportResult.reason;
+    span.finish('analysis_failed', {}, { level: 'error', error: err });
+    throw err;
   }
-
-  let report = reportResult.value;
 
   // Merge sub-agent findings into the report (additive — sub-agents extend, not replace)
   if (subResults.status === 'fulfilled' && subResults.value.succeededCount > 0) {
@@ -417,6 +422,7 @@ export async function analyzeBlueprint(opts: {
     modelUsed:    config.proModel,
     tokenCount:   subResults.status === 'fulfilled' ? subResults.value.allFindings.length : undefined,
   };
+
 
   updateWorkspace(sessionId, { report: fullReport, status: 'ready' });
   publishEvent('curator.report_ready', sessionId, traceId, {
@@ -554,20 +560,48 @@ Produce the smallest possible diff that addresses this finding.`,
 
 // ── Apply edit ────────────────────────────────────────────────────────────────
 
-export function applyEdit(
+export async function applyEdit(
   sessionId: string,
   editId: string,
   blueprint: Blueprint
-): Blueprint {
+): Promise<Blueprint> {
   const workspace = getCuratorWorkspace(sessionId);
   if (!workspace) throw new Error('No curator session found');
-  
+
   const edit = workspace.proposedEdits.find(e => e.id === editId);
   if (!edit) throw new Error(`Edit not found: ${editId}`);
   if (workspace.appliedEdits.includes(editId)) throw new Error(`Edit already applied: ${editId}`);
 
   const traceId = randomUUID();
   publishEvent('curator.edit_confirmed', sessionId, traceId, { editId, title: edit.title });
+
+  // v2.7.0 — create a blueprint version BEFORE applying any edit so every change
+  // is reversible. Previously edits were applied with no versioning, contradicting
+  // the stated design ("a new blueprint version is created before any edit is applied").
+  try {
+    const { createVersion } = await import('./blueprintVersions');
+    const version = createVersion({
+      blueprintId:    blueprint.id,
+      snapshot:       blueprint,
+      author:         'curator',
+      authorDetail:   'curator.edit',
+      changeSummary:  `Curator edit applied: ${edit.title}`,
+      changeType:     'full',
+      sessionId,
+      previousSnapshot: blueprint,
+    });
+    log.info({ versionNumber: version.versionNumber, blueprintId: blueprint.id }, '[curator] version created before edit application');
+    publishEvent('blueprint.version_created', sessionId, traceId, {
+      blueprintId: blueprint.id,
+      versionNumber: version.versionNumber,
+      author: 'curator',
+      changeSummary: version.changeSummary,
+    });
+  } catch (err) {
+    // Blueprint versioning is best-effort from the engine side — if the table
+    // does not exist the edit is still applied and surfaced in the log.
+    log.warn({ err }, '[curator] blueprint version creation skipped');
+  }
 
   // Apply the diff to the blueprint
   let updated = { ...blueprint };

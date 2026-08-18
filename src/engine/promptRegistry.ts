@@ -366,6 +366,24 @@ class PromptRegistryImpl {
   }
 
   /**
+   * Compose a system prompt fragment for an agent with the given skills, runtime
+   * context, and constraints injected. Returns the fragment plus a validation
+   * result so callers can log or react to coherence problems before sending.
+   *
+   * This is the wiring helper used at v2.7.0+ by agents that build their system
+   * prompt from an inline base: the inline base is the template body, and the
+   * registry guarantees the assembled prompt is validated before any model call.
+   */
+  composeAndValidate(
+    agentType: AgentType,
+    skills: Skill[],
+    context: PromptContext
+  ): { prompt: string; validation: ValidationResult } {
+    const prompt = this.compose(agentType, skills, context);
+    return { prompt, validation: this.validate(prompt) };
+  }
+
+  /**
    * Compose the final system prompt for an agent.
    * Injects skills, context, and constraints into the template's injection points.
    */

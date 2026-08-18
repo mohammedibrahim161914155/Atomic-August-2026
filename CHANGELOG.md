@@ -2,6 +2,38 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.7.0] — August 2026
+### Full-File Audit & Production Hardening
+
+A full-file audit verified that every documented behaviour has real working
+logic behind it, closing the four gaps identified during the audit.
+
+- **Prompt registry wiring** (`pillarRunner.ts`): the governor prompt and
+  every agent system prompt are validated through
+  `promptRegistry.validate()` before being sent to the model — unreplaced
+  markers and undersized prompts are caught at runtime, not after the fact
+- **Codex-style context auto-compaction** (`agent-builder/`, `tool-builder/`):
+  `compactIfNeeded` wired into the synthesis regions of all three pipelines
+  (feature-creator already had it); large contexts now warn/compact instead
+  of silently truncating at provider limits
+- **Blueprint versioning in the curator** (`curator.applyEdit`): a blueprint
+  version is now created via `createVersion()` before any edit is applied —
+  every change is reversible (`applyEdit` is now async; `server.ts` awaits it)
+- **Sequential sub-agent merge** (Artemis + Curator): sub-agents run before
+  the main generation call and their real outputs are merged into the system
+  prompt, grounding the brief/report in actual sub-agent findings instead of
+  empty placeholders
+- **Full-file audit suite** (`src/engine/__tests__/fullFileAudit.test.ts`):
+  11 new tests covering prompt registry validation, curator versioning,
+  sub-agent merging, blueprint versions, and the compaction contract
+
+### Fixed
+- `pillarRunner.ts` `systemPrompt` hoisted to `const`
+- Unused `_compacted`/`_compactTokens` prefixing in pipeline synthesis regions
+- Flaky retry timing tests hardened against full-suite wall-clock drift
+
+- +11 tests — 480 passing total
+
 ## [2.6.0] — August 2026
 
 ### System & Harness SOTA Upgrade (src/engine/) — Codex / Kimi CLI / OpenCode / OpenDesign

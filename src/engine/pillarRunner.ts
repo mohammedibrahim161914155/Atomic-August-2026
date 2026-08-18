@@ -3,6 +3,7 @@ import { runAgentWithTools } from './agentRunner';
 import { withRetry } from './withRetry';
 import { startStage, closeStage, type RunAuditLedger } from './runAuditLedger';
 import { createPromptParts, addLayer, getPromptParts } from './promptParts';
+import { promptRegistry } from './promptRegistry';
 import { PillarName, PillarOutput, AgentOutput, GovernorIntent, EngineEvent, ModelConfig, PillarProsecutorReport, PillarProsecutorReportSchema, PillarBrief, PillarBriefSchema, PillarSummary } from './types';
 import { EFFORT_TOKEN_BUDGETS } from './config';
 import { runPerPillarSynthesizer } from './perPillarSynthesizer';
@@ -73,6 +74,17 @@ async function runPillarGovernor(
   addLayer(briefParts, 'context', `GovernorIntent:\n${JSON.stringify(intent, null, 2)}`);
   addLayer(briefParts, 'task', `Produce the ${pillarName} pillar brief now.`);
   const prompt = getPromptParts(briefParts);
+
+  // v2.7.0 — validate the assembled prompt against the registry (no unreplaced
+  // markers, minimum length) before sending to the model.
+  const promptValidation = promptRegistry.validate(prompt);
+  if (!promptValidation.valid) {
+    log.warn({ pillarName, errors: promptValidation.errors }, '[pillar] governor prompt validation warnings');
+  }
+  const systemValidation = promptRegistry.validate(systemPrompt.replace(/\{pillarName\}/g, pillarName));
+  if (!systemValidation.valid) {
+    log.warn({ pillarName, errors: systemValidation.errors }, '[pillar] governor system prompt validation warnings');
+  }
   
   const { data } = await withRetry(
     () => generateJson<PillarBrief>(
@@ -145,6 +157,12 @@ export async function runPillar(
     // Append the agentic coordination protocol to the agent's system prompt
     // so it knows how and when to use its tools.
     const systemPrompt = `${briefStr}\n\n${agent.systemPrompt}${AGENT_TOOL_INSTRUCTIONS}`;
+
+    // v2.7.0 — validate the composed agent system prompt before every call.
+    const systemValidation = promptRegistry.validate(systemPrompt);
+    if (!systemValidation.valid) {
+      log.warn({ agent: agent.name, errors: systemValidation.errors }, '[pillar] agent system prompt validation warnings');
+    }
 
     try {
       const { content, tokens_used } = await withTimeout(
