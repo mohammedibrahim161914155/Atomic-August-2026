@@ -1,6 +1,6 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.7.0-blue)
+![Version](https://img.shields.io/badge/version-2.8.0-blue)
 ![Tests](https://img.shields.io/badge/tests-480%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -33,6 +33,29 @@ Five concrete gaps were identified and closed with real working logic:
 - **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
   estimation, verdict, and drift per run — queryable via the new `/runs`,
   `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
+
+## What's New in 2.8.0 — Agentic Chat Agents (August 2026)
+
+The three chat agents (Artemis, Curator, General) now run a true agentic
+tool loop instead of a single blind LLM call per message — modelled on the
+OpenAI Codex agent loop, Nous Research Hermes' plan-first/verify-then-answer
+pattern, and OpenCode's context management. Every answer is grounded in the
+real SQLite-backed blueprint store, long-term memory, and versioned workspace.
+
+- **Shared agentic tool loop** (`chatAgentLoop.ts`): reason → tool call →
+  observe → refine, with Codex-style append-only working history, per-agent
+  step budgets with 80% warnings and a hard cap, and model escalation with
+  provider fallback on repeated failures.
+- **Artemis** can now persist requirements into long-term memory,
+  recall past decisions, and check real scoping readiness before promising
+  a Project Brief.
+- **Curator** can read real blueprint sections, attach persisted notes, and
+  open versioned, SQLite-backed proposed edits through tool calls — the
+  plain-text parsing path remains as a fallback.
+- **General** keeps per-session conversation history, grounds answers in the
+  latest saved blueprint, and stays strictly read-only.
+- **Conversation compaction** (OpenCode pattern): 95%-window auto-compaction
+  in every synthesis region and across chat turns.
 
 ## What's New in 2.7.0 — Full-File Audit & Production Hardening (August 2026)
 

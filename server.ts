@@ -2865,9 +2865,10 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
     }
   });
 
-  // ── General chat route ────────────────────────────────────────────────────────
-
+    // ── General chat route ────────────────────────────────────────────────────────
   // POST /api/v1/chat/general — general blueprint Q&A (read-only, streaming)
+  // v2.8.0 — process-scoped per-session history for the general agent.
+  const generalHistory = new Map<string, { role: 'user' | 'assistant'; content: string }[]>();
   v1.post('/chat/general', apiLimiter, async (req, res): Promise<void> => {
     const { message, blueprint: bpRaw, config: _configOverride } = req.body ?? {};
     if (!message) { res.status(400).json({ error: 'message is required' }); return; }
@@ -2886,21 +2887,54 @@ async function createApp(opts: { port: number } = { port: 5000 }): Promise<{ app
         ...(_configOverride?.thinkingEnabled !== undefined ? { thinkingEnabled: _configOverride.thinkingEnabled } : {}),
         ...(_configOverride?.proModel ?? _configOverride?.model ? { proModel: _configOverride.proModel ?? _configOverride.model } : {}),
       };
-      const { streamText } = await import('ai');
-      const { getModelForConfig } = await import('./src/engine/openrouter');
-      const model = getModelForConfig(config, config.proModel);
-      const bpContext = bpRaw ? `\nBlueprint context:\n${JSON.stringify(bpRaw).slice(0, 4000)}` : '';
-      const result = streamText({
-        model,
-        system: `You are an expert technical advisor helping users understand and explore architecture blueprints.
+      // v2.8.0 — agentic tool loop for general Q&A: the agent grounds answers
+      // in the real blueprint and long-term memory via tool calls, keeps
+      // per-session conversation history, and emits tool side-effects to the
+      // client through the SSE stream.
+      const { runAgentTurn } = await import('./src/engine/chatAgentLoop');
+      const { generalTools } = await import('./src/engine/chatTools');
+      const { getBlueprint, listBlueprints } = await import('./src/engine/blueprintStore');
+      const { createAgentBudget } = await import('./src/engine/agentBudget');
+      let latestBp: Blueprint[] = [];
+      if (bpRaw) {
+        latestBp = [bpRaw as Blueprint];
+      } else {
+        const latest = listBlueprints({ limit: 1 }).items[0];
+        if (latest) {
+          const full = getBlueprint(latest.id);
+          if (full?.blueprint) latestBp = [full.blueprint];
+        }
+      }
+      const bpContext = latestBp[0]
+        ? `\nBlueprint context:\n${JSON.stringify(latestBp[0]).slice(0, 4000)}`
+        : '';
+      const sessionId = (req.body.sessionId as string | undefined) ?? 'general';
+      if (!generalHistory.has(sessionId)) generalHistory.set(sessionId, []);
+      const history = generalHistory.get(sessionId)!;
+      history.push({ role: 'user' as const, content: message });
+      if (history.length > 50) history.splice(0, history.length - 50);
+
+      const loop = await runAgentTurn({
+        systemPrompt: `You are an expert technical advisor helping users understand and explore architecture blueprints.
 CRITICAL RULE: You are in READ-ONLY mode. You CANNOT modify the blueprint in any way.
 You can explain, analyze, compare, and answer questions. Never suggest direct edits — refer users to the Curator for changes.
 ${bpContext}`,
-        messages: [{ role: 'user', content: message }],
+        history,
+        tools: generalTools().map(t => ({ ...t, permission: 'full-auto' as const })),
+        model: config.proModel,
+        maxTurnSteps: 4,
         maxOutputTokens: 1024,
         temperature: 0.5,
+        config,
+        budget: createAgentBudget(),
+        sessionId,
+        agentId: 'general',
+        state: { blueprints: latestBp },
       });
-      for await (const chunk of result.textStream) { send(chunk); }
+      history.push({ role: 'assistant' as const, content: await loop.finalText });
+      if (history.length > 50) history.splice(0, history.length - 50);
+
+      for await (const chunk of loop.textStream) { send(chunk); }
       if (!res.writableEnded) { res.write('data: [DONE]\n\n'); res.end(); }
     } catch (err: any) {
       log.error({ err }, '[chat/general] failed');

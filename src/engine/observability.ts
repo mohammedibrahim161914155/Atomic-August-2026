@@ -25,7 +25,9 @@ export type ObservabilityCategory =
   | 'artemis'
   | 'curator'
   | 'skills'
-  | 'event_bus';
+  | 'event_bus'
+  // v2.8.0 — agentic chat tool-loop category
+  | 'chat';
 
 export interface SerializedError {
   name: string;

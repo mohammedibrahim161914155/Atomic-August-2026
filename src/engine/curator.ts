@@ -19,7 +19,7 @@
  *   - Integrated with blueprintVersions for immutable version history
  */
 
-import { streamText, generateObject } from 'ai';
+import { generateObject } from 'ai';
 import { z } from 'zod';
 import { ModelConfig } from './config';
 import { getModelForConfig } from './openrouter';
@@ -236,7 +236,7 @@ export function createCuratorSession(sessionId: string, blueprintId: string): Cu
   return workspace;
 }
 
-function updateWorkspace(sessionId: string, updates: Partial<CuratorWorkspace>): void {
+export function updateWorkspace(sessionId: string, updates: Partial<CuratorWorkspace>): void {
   const existing = curatorCache.get(sessionId) ?? getCuratorWorkspace(sessionId);
   if (!existing) throw new Error(`Curator workspace not found: ${sessionId}`);
   const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() };
@@ -464,7 +464,6 @@ export async function curatorChat(opts: {
   workspace.thread.push(userMsg);
   updateWorkspace(sessionId, { thread: workspace.thread });
 
-  const model          = getModelForConfig(config, config.proModel);
   const longTermCtx    = formatLongTermContext('curator', 8);
   const systemPrompt   = buildCuratorSystemPrompt(activeSkillIds, blueprint, longTermCtx || undefined);
   const blueprintContext = `Current Blueprint Summary:\n${buildBlueprintSummary(blueprint)}`;
@@ -476,18 +475,40 @@ export async function curatorChat(opts: {
     { role: 'user' as const, content: message },
   ];
 
-  let fullText = '';
-  const result = streamText({
-    model,
-    system: systemPrompt,
-    messages,
+  // v2.8.0 — agentic tool loop (Codex agent-loop pattern). Each curator turn
+  // can ground answers in real blueprint data and open real, versioned
+  // proposed edits through tool calls instead of plain-text proposals alone.
+  const { runAgentTurn } = await import('./chatAgentLoop');
+  const { curatorTools } = await import('./chatTools');
+  const { createAgentBudget } = await import('./agentBudget');
+  const budget = createAgentBudget();
+  const tools = curatorTools().map(t => ({ ...t, permission: 'full-auto' as const }));
+  let loopCompacted = false;
+  let streamDone = false;
+  const loop = await runAgentTurn({
+    systemPrompt,
+    history: messages,
+    tools,
+    model: config.proModel,
+    maxTurnSteps: 6,
     maxOutputTokens: 2048,
     temperature: 0.3,
-    onFinish: async ({ text }) => { fullText = text; },
+    config,
+    budget,
+    sessionId,
+    agentId: 'curator',
+    state: { sessionId, blueprint, workspace },
   });
+  loop.compacted.then(c => { loopCompacted = c }).catch(() => {});
+  const textStream = (async function* () {
+    for await (const chunk of loop.textStream) yield chunk;
+    streamDone = true;
+  })();
+  const fullText = await loop.finalText;
 
   const onComplete = (async () => {
-    await result.text;
+    void streamDone;
+    void fullText;
     const assistantMsg = {
       id: randomUUID(), role: 'assistant' as const,
       content: fullText, timestamp: new Date().toISOString(),
@@ -496,22 +517,29 @@ export async function curatorChat(opts: {
     ws.thread.push(assistantMsg);
     updateWorkspace(sessionId, { thread: ws.thread });
 
-    // Parse any proposed edits from the response
-    const proposedEdits = extractProposedEdits(fullText, sessionId);
+    // Parse any proposed edits from the response (plain-text fallback; the
+    // primary path is the request_edit tool call, which persists via the
+    // curator workspace and is versioned before application).
+    const toolProposedEdits = getCuratorWorkspace(sessionId)?.proposedEdits ?? [];
+    const proposedEdits = [
+      ...toolProposedEdits,
+      ...extractProposedEdits(fullText, sessionId),
+    ];
     if (proposedEdits.length > 0) {
-      updateWorkspace(sessionId, {
-        proposedEdits: [...(ws.proposedEdits ?? []), ...proposedEdits],
-      });
+      updateWorkspace(sessionId, { proposedEdits });
       for (const edit of proposedEdits) {
         publishEvent('curator.edit_proposed', sessionId, traceId, { editId: edit.id, title: edit.title });
       }
+    }
+    if (loopCompacted) {
+      log.info({ sessionId }, '[curator] context auto-compacted during turn');
     }
 
     return { content: fullText, proposedEdits };
   })();
 
   return {
-    textStream: result.textStream,
+    textStream,
     onComplete,
   };
 }
@@ -531,9 +559,8 @@ export async function proposeEdit(opts: {
   const finding = workspace.report.findings.find(f => f.id === findingId);
   if (!finding) throw new Error(`Finding not found: ${findingId}`);
 
-  const traceId = randomUUID();
+    const traceId = randomUUID();
   const model = getModelForConfig(config, config.proModel);
-
   const { object } = await generateObject({
     model,
     schema: ProposedEditSchema.omit({ id: true }),
@@ -624,7 +651,7 @@ export async function applyEdit(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function buildBlueprintSummary(blueprint: Blueprint): string {
+export function buildBlueprintSummary(blueprint: Blueprint): string {
   const pillarSummaries = Object.entries(blueprint.pillars)
     .map(([name, p]) => `### ${name}\n${p.synthesizer_output?.slice(0, 500) ?? '(no output)'}...`)
     .join('\n\n');

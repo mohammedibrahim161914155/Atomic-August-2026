@@ -2,6 +2,41 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.8.0] — August 2026
+### Agentic Chat Agents
+
+The three chat agents (Artemis, Curator, General) were upgraded from a
+single LLM call per message to a true agentic tool loop, modelled on the
+OpenAI Codex agent loop, Nous Hermes' plan-first/verify-then-answer pattern,
+and OpenCode's context management.
+
+**Added**
+- **`chatAgentLoop.ts` — shared agentic tool-loop core**: reason → tool call
+  → observe → refine with Codex-style append-only working history,
+  per-agent step budgets (80% warning + hard cap, `agentBudget.ts`),
+  model escalation with provider fallback on repeated failures, prompt
+  validation before every step, and conversation auto-compaction
+  (95%-window, OpenCode pattern).
+- **`chatTools.ts` — real working chat tools**: blueprint section reads,
+  blueprint summary, persisted curator notes, persisted requirements into
+  long-term memory, memory recall, readiness checks via the real confidence
+  engine, and versioned proposed edits stored in the curator workspace.
+- **Chat telemetry**: `chat.loop_start`, `chat.step`, `chat.tool_call`,
+  `chat.tool_denied`, `chat.model_fallback`, `chat.model_exhausted`,
+  `chat.budget_warning`, `chat.budget_exceeded`, `chat.loop_error`,
+  `chat.loop_end` events wired through the event bus.
+- **Artemis**: each turn now runs the tool loop (max 4 steps) — it can
+  persist requirements, recall past decisions, and check real readiness.
+- **Curator**: each turn runs the tool loop (max 6 steps) — grounded
+  blueprint reads, persisted notes, and real versioned proposed edits;
+  plain-text edit parsing kept as fallback.
+- **General**: per-session conversation history (process-scoped, 50-turn
+  cap), grounding in the latest saved blueprint, strict read-only mode.
+
+**Fixed**
+- `curator.applyEdit` / chat turn: proposal parsing merged with tool-call
+  path so duplicates are avoided; workspace update kept idempotent.
+
 ## [2.7.0] — August 2026
 ### Full-File Audit & Production Hardening
 

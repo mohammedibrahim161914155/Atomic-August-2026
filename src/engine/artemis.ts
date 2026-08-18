@@ -15,7 +15,7 @@
  *   - Streaming responses via textStream
  */
 
-import { streamText, generateObject } from 'ai';
+import { generateObject } from 'ai';
 import { z } from 'zod';
 import { ModelConfig } from './config';
 import { getModelForConfig } from './openrouter';
@@ -502,7 +502,6 @@ export async function artemisChat(opts: {
     length: message.length,
   });
 
-  const model = getModelForConfig(config, config.proModel);
 
   // Inject cross-session long-term memory into system prompt
   const longTermCtx  = formatLongTermContext('artemis', 10);
@@ -514,22 +513,47 @@ export async function artemisChat(opts: {
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
   messages.push({ role: 'user', content: message });
 
+  // v2.8.0 — agentic tool loop (Codex agent-loop pattern). Each Artemis turn
+  // can now reason → call a tool (remember_requirement / recall_memory /
+  // check_ready) → observe the result → refine the answer, instead of a
+  // single blind LLM call.
+  const { runAgentTurn } = await import('./chatAgentLoop');
+  const { artemisTools } = await import('./chatTools');
+  const { createAgentBudget } = await import('./agentBudget');
+  const budget = createAgentBudget();
+  // v2.8.0 G2: Codex permission tiers — all artemis chat tools run in
+  // full-auto (read-only memory ops; writes are scoped and idempotent).
+  const tools = artemisTools().map(t => ({ ...t, permission: 'full-auto' as const }));
   let fullText = '';
+  let loopCompacted = false;
 
-  const result = streamText({
-    model,
-    system: systemPrompt,
-    messages,
+  const loop = await runAgentTurn({
+    systemPrompt,
+    history: messages,
+    tools,
+    model: config.proModel,
+    maxTurnSteps: 4,
     maxOutputTokens: 1024,
     temperature: 0.7,
-    onFinish: async ({ text }) => {
-      fullText = text;
-    },
+    config,
+    budget,
+    sessionId,
+    agentId: 'artemis',
+    state: { workspace },
   });
+  loop.compacted.then(c => { loopCompacted = c }).catch(() => {});
+  let streamDone = false;
+  const textStream = (async function* () {
+    for await (const chunk of loop.textStream) {
+      yield chunk;
+    }
+    streamDone = true;
+  })();
+  fullText = await loop.finalText;
 
   // Async completion handler
   const onComplete = (async (): Promise<{ message: ChatMessage; workspace: ArtemisWorkspace }> => {
-    await result.text; // wait for stream to complete
+    void streamDone;
 
     const assistantMsg: ChatMessage = {
       id:        randomUUID(),
@@ -553,6 +577,9 @@ export async function artemisChat(opts: {
       confidenceScore: score,
       requirementMap:  map,
     });
+    if (loopCompacted) {
+      log.info({ sessionId }, '[artemis] context auto-compacted during turn');
+    }
 
     let finalWorkspace = getArtemisWorkspace(sessionId)!;
 
@@ -583,7 +610,7 @@ export async function artemisChat(opts: {
   })();
 
   return {
-    textStream: result.textStream,
+    textStream,
     onComplete,
   };
 }
