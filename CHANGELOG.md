@@ -2,6 +2,32 @@
 
 All notable changes to Atomic are documented here.
 
+## [2.5.0] — August 2026
+
+### SDK — Production-Grade Typed Client (src/sdk/)
+- Complete rewrite of the TypeScript/REST client: `AtomicClient` with typed resources for blueprints, sessions, pipelines, plugins, observability, chat, versions, skills, curator, and artemis — all aligned to the real server contract
+- Full error taxonomy: `AtomicError` base class with `AtomicNetworkError`, `AtomicAuthError`, `AtomicRateLimitError`, `AtomicStreamError`, `AtomicTimeoutError` — every HTTP failure maps to a typed, actionable exception
+- Automatic retry with exponential backoff + jitter for idempotent requests; `Retry-After`-aware rate-limit handling
+- Robust SSE streaming: `stream()` for raw event streams and `streamEvents()` for structured event arrays, with keepalive/ping handling and graceful abort
+- `generate()` (SSE streaming) and `generateAsync()` + `waitForRun()` (async trigger flow with polling)
+- Plugin engine API via SDK: register, enable/disable, configure, dispatch events, digests
+- Configurable timeouts, auth (API key / bearer), per-request overrides, and full TypeScript generics over response shapes
+
+### MCP Server — Spec-Compliant Model Context Protocol (src/mcp/)
+- Modularity split: `server.ts` (transports), `dispatch.ts` (JSON-RPC lifecycle), `tools.ts` (definitions), `tool-handlers.ts` (handler mapping), `validation.ts` (strict JSON-Schema validation), `atomic-client.ts` (retryable upstream client)
+- **Both transports**: stdio + Streamable HTTP (2025-03-26) — POST for requests, GET for SSE streams, `Mcp-Session-Id` session lifecycle, notification/initialized handling, 202 Accepted for notifications
+- Strict tool input validation returning `-32602` with per-field error paths; coercion + defaults
+- Session gating: `-32002` MethodNotFound until initialized; unknown session IDs rejected with 404
+- Cancellation propagation via `AbortSignal` per tool invocation; handler errors surfaced as MCP `isError` tool results (never uncaught crashes)
+- Tool registry aligned to the real API: `atomic_generate_blueprint` (generate-start), `atomic_get_status`, `atomic_get_result` (sessions/{id}/blueprint), `atomic_rerun_pillar`, `atomic_validate_task`, `atomic_list_blueprints`, plus 3 prompts and resource endpoints
+- Retryable upstream calls with timeouts and structured error surfacing in tool results
+
+### Verification
+- 434/434 tests passing (39 new MCP + SDK tests covering validation, dispatch gating, transports, tool handlers, cancellation, HTTP session lifecycle)
+- TypeScript strict: 0 errors · ESLint: 0 errors
+- Production builds: client, server.cjs, MCP bundle (ESM with Node externals shim)
+- Production smoke test (smoke25.sh) PASS
+
 ## [2.4.0] — August 2026
 
 ### Added — client-side export plugin platform (engine-plugin quality parity)

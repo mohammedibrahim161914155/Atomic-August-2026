@@ -1,23 +1,29 @@
 /**
  * src/sdk/resources/blueprints.ts
  *
- * Blueprint resource — full CRUD + generation with live SSE streaming.
+ * Blueprint resource — full CRUD + synchronous and asynchronous generation.
+ * Query parameters follow the real server contract exactly
+ * (limit/offset/search/tag/sort/date_after/quality_min).
  */
 
 import type { AtomicHTTP } from '../client';
 import type {
-  Blueprint, BlueprintListResponse, BlueprintSummary,
+  Blueprint, BlueprintListOptions, BlueprintListResponse, BlueprintSummary,
   GenerateOptions, GenerateResult, GenerationEvent,
+  GenerateAsyncOptions, GenerateAsyncResult, RunInfo, RunStatus,
 } from '../types';
+import { AtomicError, AtomicStreamError } from '../types';
+
+
 
 export class Blueprints {
   constructor(private readonly http: AtomicHTTP) {}
 
   /**
-   * Generate a blueprint using the Atomic multi-agent pipeline.
+   * Generate a blueprint using the Atomic multi-agent pipeline (synchronous SSE).
    *
-   * If `opts.onProgress` is provided, SSE events are forwarded in real time.
-   * The returned promise resolves once the pipeline is complete and the blueprint
+   * If `opts.onProgress` is provided, pipeline events are forwarded in real time.
+   * The returned promise resolves once the pipeline completes and the blueprint
    * has been persisted.
    *
    * @example
@@ -32,40 +38,66 @@ export class Blueprints {
   async generate(opts: GenerateOptions): Promise<GenerateResult> {
     const { prompt, mode = 'fast', pipelineType = 'blueprint', modelConfig, onProgress } = opts;
 
-    // Step 1 — kick off async generation (returns sessionId immediately)
-    const { sessionId } = await this.http.request<{ sessionId: string }>('/generate-start', {
+    const body: Record<string, unknown> = {
+      prompt: prompt.trim(),
+      mode,
+      pipelineType,
+      ...(modelConfig ? { config: modelConfig } : {}),
+    };
+
+    const events = await this.http.streamEvents<GenerationEvent>('/generate', body, {
+      onEvent: (event) => {
+        // Surface non-terminal events via the progress callback
+        if (event.type !== 'complete' && event.type !== 'done' && onProgress) onProgress(event);
+      },
+    });
+
+    const complete = events.find(ev => ev.type === 'complete' || ev.type === 'done');
+    const blueprint = complete?.blueprint as Blueprint | undefined;
+
+    if (!blueprint) {
+      const failure = events.find(ev => ev.type === 'error' || ev.type === 'failed');
+      throw new AtomicStreamError(failure?.message ?? 'Generation completed without a blueprint');
+    }
+
+    const sessionId = blueprint.session_id ?? String(complete?.sessionId ?? '');
+    return { sessionId, blueprint };
+  }
+
+  /**
+   * Start an asynchronous generation and return a run id immediately.
+   * Poll with `getRun` until the status is `completed` or `failed`.
+   */
+  async generateAsync(opts: GenerateAsyncOptions): Promise<GenerateAsyncResult> {
+    const { prompt, mode = 'fast', pipelineType = 'blueprint', modelConfig } = opts;
+    const result = await this.http.request<{ runId?: string; run_id?: string }>('/generate-async', {
       method: 'POST',
-      body: { prompt, mode, pipelineType, config: modelConfig },
+      body: {
+        prompt: prompt.trim(),
+        mode,
+        pipelineType,
+        ...(modelConfig ? { config: modelConfig } : {}),
+      },
     });
+    return { runId: result.runId ?? result.run_id ?? '' };
+  }
 
-    // Step 2 — subscribe to SSE stream
-    return new Promise<GenerateResult>((resolve, reject) => {
-      const url   = this.http.url(`/generate-stream/${sessionId}`);
-      const es    = new EventSource(url);
-      let done    = false;
+  /** Poll the state of an async generation run. */
+  async getRun(runId: string): Promise<RunInfo> {
+    return this.http.request<RunInfo>(`/run/${runId}`);
+  }
 
-      es.onmessage = (e) => {
-        try {
-          const event = JSON.parse(e.data as string) as GenerationEvent;
-          onProgress?.(event);
-          if (event.type === 'complete' && event['blueprintId']) {
-            done = true;
-            es.close();
-            this.get(event['blueprintId'] as string)
-              .then(blueprint => resolve({ sessionId, blueprint }))
-              .catch(reject);
-          } else if (event.type === 'error') {
-            done = true;
-            es.close();
-            reject(new Error((event.message ?? 'Generation failed')));
-          }
-        } catch { /* partial event */ }
-      };
-
-      es.onerror = (err) => {
-        if (!done) { es.close(); reject(new Error(`SSE connection error: ${String(err)}`)); }
-      };
-    });
+  /** Poll until an async run reaches a terminal state (completed/failed/aborted). */
+  async waitForRun(runId: string, opts: { pollIntervalMs?: number; timeoutMs?: number } = {}): Promise<RunInfo> {
+    const pollIntervalMs = opts.pollIntervalMs ?? 1_500;
+    const timeoutMs      = opts.timeoutMs ?? this.http.timeout;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const info = await this.getRun(runId);
+      if (['completed', 'failed', 'aborted'].includes(info.status as RunStatus)) return info;
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    }
+    throw new AtomicError(408, `Run ${runId} did not complete within ${timeoutMs}ms`);
   }
 
   /** Get a single blueprint by ID */
@@ -76,24 +108,21 @@ export class Blueprints {
   /**
    * List blueprints with optional filters.
    *
-   * @param opts.page     1-based page number (default: 1)
-   * @param opts.pageSize Results per page (default: 20, max: 100)
-   * @param opts.search   Full-text search query
-   * @param opts.sort     'created_at' | 'quality_score' | 'rating'
+   * Parameters are translated to the server's real query contract:
+   * `pageSize` → limit, `page` → offset, `search`, `tag`,
+   * `sort` (newest|oldest|quality), `dateAfter`, `qualityMin`.
    */
-  async list(opts: {
-    page?:     number;
-    pageSize?: number;
-    search?:   string;
-    sort?:     'created_at' | 'quality_score' | 'rating';
-    order?:    'asc' | 'desc';
-  } = {}): Promise<BlueprintListResponse> {
+  async list(opts: BlueprintListOptions = {}): Promise<BlueprintListResponse> {
     const params = new URLSearchParams();
-    if (opts.page     != null) params.set('page',     String(opts.page));
-    if (opts.pageSize != null) params.set('pageSize', String(opts.pageSize));
-    if (opts.search)           params.set('search',   opts.search);
-    if (opts.sort)             params.set('sort',     opts.sort);
-    if (opts.order)            params.set('order',    opts.order);
+    const limit = Math.min(Math.max(opts.pageSize ?? 20, 1), 100);
+    params.set('limit', String(limit));
+    if (opts.page) params.set('offset', String((opts.page - 1) * limit));
+    if (opts.search)    params.set('search', opts.search);
+    if (opts.tag)       params.set('tag', opts.tag);
+    if (opts.sort)      params.set('sort', opts.sort);
+    if (opts.dateAfter) params.set('date_after', opts.dateAfter);
+    if (opts.qualityMin != null) params.set('quality_min', String(opts.qualityMin));
+    if (opts.order)     params.set('order', opts.order);
     const qs = params.toString();
     return this.http.request<BlueprintListResponse>(`/blueprints${qs ? `?${qs}` : ''}`);
   }
@@ -122,11 +151,22 @@ export class Blueprints {
     });
   }
 
+  /** Manage tags on a blueprint */
+  async setTags(id: string, tags: string[]): Promise<{ tags: string[] }> {
+    return this.http.request<{ tags: string[] }>(`/blueprints/${id}/tags`, {
+      method: 'PATCH',
+      body:   { tags },
+    });
+  }
+
+  /** List all known blueprint tags */
+  async listTags(): Promise<{ tags: string[] }> {
+    return this.http.request<{ tags: string[] }>('/blueprints/tags');
+  }
+
   /** Export blueprint as Markdown */
   async exportMarkdown(id: string): Promise<string> {
-    const res = await globalThis.fetch(this.http.url(`/blueprints/${id}/export?format=markdown`));
-    if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
-    return res.text();
+    return this.http.request<string>(`/blueprints/${id}/export?format=markdown`);
   }
 
   /** Export blueprint as JSON */
@@ -136,8 +176,22 @@ export class Blueprints {
 
   /** Export blueprint as HTML */
   async exportHtml(id: string): Promise<string> {
-    const res = await globalThis.fetch(this.http.url(`/blueprints/${id}/export?format=html`));
-    if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
-    return res.text();
+    return this.http.request<string>(`/blueprints/${id}/export?format=html`);
+  }
+
+  /** Run a plugin-driven export action (e.g. push to Linear/Notion) */
+  async exportAction(id: string, action: string, options?: Record<string, unknown>): Promise<{ success: boolean; output?: unknown; error?: string }> {
+    return this.http.request(`/blueprints/${id}/export-action`, {
+      method: 'POST',
+      body:   { action, options },
+    });
+  }
+
+  /** Render an inline blueprint object to Markdown without persisting it */
+  async exportInline(blueprint: Blueprint, format: 'markdown' | 'html' = 'markdown'): Promise<string> {
+    return this.http.request<string>('/blueprints/export-inline', {
+      method: 'POST',
+      body:   { blueprint, format },
+    });
   }
 }

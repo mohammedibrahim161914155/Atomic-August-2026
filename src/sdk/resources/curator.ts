@@ -3,6 +3,8 @@
  *
  * Curator resource — post-pipeline refinement agent.
  * The Curator is the only agent that can write to the blueprint.
+ * Routes follow the real server contract: session-scoped
+ * /curator/:sessionId/{chat,analyze,propose-edit,apply-edit,workspace}.
  */
 
 import type { AtomicHTTP } from '../client';
@@ -29,18 +31,16 @@ export class CuratorResource {
    * ```
    */
   async createSession(blueprintId: string, config?: Record<string, unknown>): Promise<CuratorSession> {
-    return this.http.request<CuratorSession>('/curator/session', {
+    const workspace = await this.http.request<CuratorWorkspace>('/curator/session', {
       method: 'POST',
       body:   { blueprintId, config },
     });
+    return { sessionId: workspace.sessionId, workspace };
   }
 
   /** Get the current Curator workspace for a session */
   async getWorkspace(sessionId: string): Promise<CuratorWorkspace> {
-    const res = await this.http.request<{ workspace: CuratorWorkspace }>(
-      `/curator/${sessionId}/workspace`,
-    );
-    return res.workspace;
+    return this.http.request<CuratorWorkspace>(`/curator/${sessionId}/workspace`);
   }
 
   /**
@@ -48,27 +48,32 @@ export class CuratorResource {
    * Any edits the Curator proposes are returned in `proposedEdits`.
    */
   async chat(opts: CuratorChatOptions): Promise<CuratorChatResult> {
-    const { sessionId: _sessionIdUnused, message, blueprint, activeSkillIds = [], onChunk } = opts;
+    const { sessionId, message, blueprint, activeSkillIds = [], onChunk } = opts;
 
-    let content = '';
-    await this.http.stream(
-      '/curator/chat',
-      { message, blueprintId: blueprint.id, activeSkillIds },
-      chunk => {
-        content += chunk;
-        onChunk?.(chunk);
-      },
+    const content = await this.http.stream(
+      `/curator/${sessionId}/chat`,
+      { message, blueprintId: blueprint?.id, blueprint, activeSkillIds },
+      chunk => onChunk?.(chunk),
     );
 
-    // Return proposed edits from workspace
-    const workspace = await this.http.request<{ workspace: CuratorWorkspace }>(
-      '/curator/workspace',
-    ).catch(() => ({ workspace: null }));
+    // Return proposed edits from the (now updated) workspace
+    const workspace = await this.getWorkspace(sessionId).catch(() => null);
 
     return {
       content,
-      proposedEdits: workspace.workspace?.appliedEdits ?? [],
+      proposedEdits: workspace?.appliedEdits ?? [],
     };
+  }
+
+  /**
+   * Run a refinement analysis pass over a blueprint, producing a scored report
+   * with findings and proposed edits. Long-running (may take 30–120s).
+   */
+  async analyze(sessionId: string, opts: { blueprint: Blueprint; activeSkillIds?: string[] }): Promise<CuratorWorkspace> {
+    return this.http.request<CuratorWorkspace>(`/curator/${sessionId}/analyze`, {
+      method: 'POST',
+      body:   opts,
+    });
   }
 
   /**
@@ -83,13 +88,29 @@ export class CuratorResource {
   }
 
   /**
+   * Propose a refinement edit without applying it.
+   */
+  async proposeEdit(sessionId: string, opts: {
+    findingId?:   string;
+    description:  string;
+    fieldPath:    string;
+    newValue:     string;
+    rationale:    string;
+  }): Promise<ProposedEdit> {
+    return this.http.request<ProposedEdit>(`/curator/${sessionId}/propose-edit`, {
+      method: 'POST',
+      body:   opts,
+    });
+  }
+
+  /**
    * Apply a proposed edit to the blueprint.
    * Creates a new version before applying — never destructive.
    *
    * @returns The updated blueprint
    */
   async applyEdit(editId: string, blueprintId: string): Promise<Blueprint> {
-    return this.http.request<Blueprint>('/curator/apply-edit', {
+    return this.http.request<Blueprint>(`/curator/${blueprintId}/apply-edit`, {
       method: 'POST',
       body:   { editId, blueprintId },
     });
@@ -116,11 +137,10 @@ export class CuratorResource {
     onChunk?:    (chunk: string) => void;
   }): Promise<{ content: string; pillarId: string }> {
     const { blueprintId, pillarId, feedback, onChunk } = opts;
-    let content = '';
-    await this.http.stream(
+    const content = await this.http.stream(
       '/curator/improve-pillar',
       { blueprintId, pillarId, feedback },
-      chunk => { content += chunk; onChunk?.(chunk); },
+      chunk => onChunk?.(chunk),
     );
     return { content, pillarId };
   }
@@ -131,5 +151,10 @@ export class CuratorResource {
       `/curator/${sessionId}/edits`,
     );
     return res.edits;
+  }
+
+  /** Delete a Curator session. */
+  async deleteSession(sessionId: string): Promise<{ deleted: boolean }> {
+    return this.http.request<{ deleted: boolean }>(`/curator/${sessionId}`, { method: 'DELETE' });
   }
 }

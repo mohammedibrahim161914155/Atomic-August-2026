@@ -27,10 +27,15 @@ export class ArtemisResource {
    * ```
    */
   async createSession(config?: Record<string, unknown>): Promise<ArtemisSession> {
-    return this.http.request<ArtemisSession>('/artemis/session', {
+    // Server returns { sessionId, workspace }; normalize to an ArtemisSession
+    const result = await this.http.request<{ sessionId?: string; workspace?: ArtemisWorkspace } & Partial<ArtemisSession>>('/artemis/session', {
       method: 'POST',
       body:   { config },
     });
+    if (result.sessionId && result.workspace) {
+      return { sessionId: result.sessionId, workspace: result.workspace };
+    }
+    return result as unknown as ArtemisSession;
   }
 
   /** Get the current Artemis workspace for a session (includes brief + confidence) */

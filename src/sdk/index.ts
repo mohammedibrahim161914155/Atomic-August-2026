@@ -1,14 +1,17 @@
 /**
  * @module @atomic/sdk
  *
- * Atomic TypeScript SDK — programmatic access to the Atomic multi-agent AI blueprint generator.
+ * Atomic TypeScript SDK — programmatic access to the Atomic multi-agent AI
+ * blueprint generator. Embeddable in any app: Replit, Codex, Claude Code,
+ * OpenCode, Kilo Code, or your own platform.
  *
  * @example Basic usage
  * ```typescript
  * import { AtomicClient } from '@atomic/sdk';
  *
  * const client = new AtomicClient({
- *   baseUrl: 'http://localhost:5000',
+ *   baseUrl: 'http://localhost:3000',
+ *   apiKey:  process.env.ATOMIC_API_KEY,
  * });
  *
  * // Generate a blueprint
@@ -21,42 +24,58 @@
  * console.log('Quality score:', blueprint.quality_score);
  * console.log('App name:',      blueprint.intent?.product_name);
  *
- * // Chat with Artemis to scope a new project
- * const session = await client.artemis.createSession();
- * const { content, workspace } = await client.artemis.chat({
- *   sessionId: session.sessionId,
- *   message:   "I'm building a B2B fintech platform",
- *   onChunk:   chunk => process.stdout.write(chunk),
- * });
- * console.log('Confidence:', workspace.confidenceScore);
+ * // Engine plugins
+ * const report = await client.plugins.doctor(manifest);
+ * const plugin = await client.plugins.install({ id: 'export-linear', pack: 'export-linear@1.0.0' });
+ * await client.plugins.run(plugin.id, { hook: 'export', payload: { blueprintId: blueprint.id } });
  *
- * // Version history
- * const versions = await client.versions.list(blueprint.id);
- * console.log(`${versions.length} versions`);
+ * // Session steering
+ * await client.sessions.steer(sessionId, { instruction: 'Prioritize GDPR compliance' });
  *
- * // Skills
- * const skills = await client.skills.list();
- * const customSkill = await client.skills.create({
- *   name:                 'GraphQL Expert',
- *   description:          'Enforces GraphQL best practices in all output',
- *   systemPromptAddition: 'Always prefer GraphQL for API design.',
- * });
+ * // Pipeline cost estimation (before running anything expensive)
+ * const estimate = await client.pipelines.costEstimate(prompt);
+ * console.log('Estimated tokens:', estimate.estimatedTokens);
  * ```
  */
 
 // ── Primary exports ───────────────────────────────────────────────────────────
 
-export { AtomicClient } from './client';
-export { AtomicError, AtomicRateLimitError, AtomicAuthError } from './types';
+export { AtomicClient, AtomicHTTP, backoffDelay } from './client';
+export type { RequestOptions } from './client';
+export {
+  atomicErrorFromResponse,
+  SDK_VERSION,
+  SDK_USER_AGENT,
+} from './types';
+
+// ── Error classes ─────────────────────────────────────────────────────────────
+
+export {
+  AtomicError,
+  AtomicAuthError,
+  AtomicForbiddenError,
+  AtomicNotFoundError,
+  AtomicConflictError,
+  AtomicValidationError,
+  AtomicRateLimitError,
+  AtomicServerError,
+  AtomicTimeoutError,
+  AtomicRetryExhaustedError,
+  AtomicStreamError,
+} from './types';
 
 // ── Resource exports ──────────────────────────────────────────────────────────
 
-export type { Blueprints }      from './resources/blueprints';
-export type { ArtemisResource } from './resources/artemis';
-export type { CuratorResource } from './resources/curator';
-export type { SkillsResource }  from './resources/skills';
-export type { VersionsResource } from './resources/versions';
-export type { ChatResource }    from './resources/chat';
+export type { Blueprints }        from './resources/blueprints';
+export type { ArtemisResource }   from './resources/artemis';
+export type { CuratorResource }   from './resources/curator';
+export type { SkillsResource }    from './resources/skills';
+export type { VersionsResource }  from './resources/versions';
+export type { ChatResource }      from './resources/chat';
+export type { PluginsResource }   from './resources/plugins';
+export type { SessionsResource }  from './resources/sessions';
+export type { PipelinesResource } from './resources/pipelines';
+export type { ObservabilityResource } from './resources/observability';
 
 // ── Type exports ──────────────────────────────────────────────────────────────
 
@@ -71,12 +90,29 @@ export type {
   // Blueprint
   Blueprint,
   BlueprintSummary,
+  BlueprintListOptions,
   BlueprintListResponse,
   BlueprintPillar,
   BlueprintAgent,
   GenerateOptions,
   GenerateResult,
   GenerationEvent,
+
+  // Async generation
+  GenerateAsyncOptions,
+  GenerateAsyncResult,
+  RunInfo,
+  RunStatus,
+
+  // Sessions
+  SessionPlan,
+  PlanStep,
+  SteerOptions,
+  SteerResult,
+  Snapshot,
+  UndoResult,
+  Elicitation,
+  Permission,
 
   // Artemis
   ArtemisSession,
@@ -112,4 +148,21 @@ export type {
   ChatMessage,
   GeneralChatOptions,
   GeneralChatResult,
+
+  // Plugins
+  PluginInstallInput,
+  InstalledPlugin,
+  PluginTrustInfo,
+  PluginRunOptions,
+  PluginRunResult,
+  DoctorReport,
+
+  // Pipelines
+  PipelineConfig,
+  PipelineHealth,
+  CostEstimate,
+
+  // Observability
+  TraceEntry,
+  EventEntry,
 } from './types';

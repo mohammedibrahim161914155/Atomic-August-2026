@@ -1,7 +1,7 @@
 {
   "name": "atomic",
   "private": true,
-  "version": "2.4.0",
+  "version": "2.5.0",
   "type": "module",
   "engines": {
     "node": ">=18.0.0"
@@ -10,7 +10,7 @@
     "dev": "tsx server.ts",
     "build": "vite build && npm run build:server",
     "build:server": "esbuild server.ts --bundle --platform=node --format=cjs --sourcemap --outfile=dist/server.cjs --external:better-sqlite3 --external:vite",
-    "build:mcp": "esbuild src/mcp/index.ts --bundle --platform=node --sourcemap --outfile=dist/mcp/index.js --format=esm",
+    "build:mcp": "esbuild src/mcp/index.ts --bundle --platform=node --format=esm --outfile=dist/mcp/index.js --external:node:* --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url); import { fileURLToPath } from 'url'; const __filename = fileURLToPath(import.meta.url); const __dirname = fileURLToPath(new URL('.', import.meta.url));\"",
     "start": "npm run build && NODE_ENV=production node dist/server.cjs",
     "start:prod": "NODE_ENV=production node dist/server.cjs",
     "deploy": "npm run build && npm run start:prod",

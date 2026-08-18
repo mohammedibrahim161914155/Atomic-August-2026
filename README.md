@@ -1,7 +1,7 @@
 # Atomic — Multi-Agent AI Blueprint Generator
 
-![Version](https://img.shields.io/badge/version-2.4.0-blue)
-![Tests](https://img.shields.io/badge/tests-337%20passing-green)
+![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![Tests](https://img.shields.io/badge/tests-434%20passing-green)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,6 +33,32 @@ Five concrete gaps were identified and closed with real working logic:
 - **Per-run telemetry** (Kilo Code pattern): duration, token usage, cost
   estimation, verdict, and drift per run — queryable via the new `/runs`,
   `/elicitations`, `/permissions`, and `/quality/:pipeline` endpoints.
+
+## What's New in 2.5.0 — SDK + MCP Hardening (August 2026)
+
+Atomic now ships a **production-grade TypeScript/REST client SDK** (`src/sdk/`)
+and a **spec-compliant Model Context Protocol server** (`src/mcp/`), so Atomic
+can run anywhere: embedded in any app via the SDK, or as a plugin in Codex,
+Claude Code, OpenCode, Kilo Code, Cursor, and any MCP-capable client.
+
+The SDK exposes typed resources for blueprints, sessions, pipelines, plugins,
+observability, chat, versions, skills, curator, and artemis — all aligned to
+the real server contract. It includes a full error taxonomy (`AtomicError`,
+`AtomicNetworkError`, `AtomicAuthError`, `AtomicRateLimitError`,
+`AtomicStreamError`, `AtomicTimeoutError`), automatic retry with exponential
+backoff and `Retry-After`-aware rate-limit handling, and robust SSE streaming
+(`stream()` for raw events, `streamEvents()` for structured arrays) powering
+both the synchronous `generate()` and async `generateAsync()` + `waitForRun()`
+flows.
+
+The MCP server implements the 2025-03-26 specification on **both transports**:
+stdio (for agent CLIs) and Streamable HTTP (POST requests, GET SSE streams,
+`Mcp-Session-Id` lifecycle, notification handling). Tool inputs are strictly
+validated with per-field `-32602` error paths, sessions are gated until
+initialized, cancellation propagates through an `AbortSignal` per invocation,
+and handler failures surface as MCP `isError` tool results rather than crashes.
+The tool registry covers blueprint generation, status/result retrieval,
+pillar reruns, task validation, blueprint search, plus prompts and resources.
 
 ## What's New in 2.3.0 — Engine Plugin Platform (August 2026)
 
